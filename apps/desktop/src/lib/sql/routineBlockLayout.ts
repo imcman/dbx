@@ -140,8 +140,8 @@ export function indentRoutineBlocks(sql: string, dialectId: string, indentWidth:
       startLine();
       headerDone = false;
     }
-    if (oracle && word === "cursor" && tokenValue.depth === 0 && declarationLevels.at(-1) === level - 1) cursorHeader = true;
-    if (isBlockBegin && declarationLevels.at(-1) === level - 1) level = declarationLevels.pop()!;
+    if (oracle && word === "cursor" && tokenValue.depth === 0 && declarationLevels[declarationLevels.length - 1] === level - 1) cursorHeader = true;
+    if (isBlockBegin && declarationLevels[declarationLevels.length - 1] === level - 1) level = declarationLevels.pop()!;
     // A `CASE` expression owns its `THEN`/`ELSE`/`END`; none of them is block syntax.
     const closesCase = word === "end" && tokenValue.depth === 0 && caseDepth > 0;
     const isBlockEnd = word === "end" && tokenValue.depth === 0 && caseDepth === 0;
