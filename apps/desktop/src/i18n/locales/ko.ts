@@ -1316,6 +1316,7 @@ export default withEnglishFallback({
     matchPreviewLimit: "일치하는 총 {total}개 줄 중 처음 {limit}개 줄만 미리 볼 수 있습니다.",
   },
   connection: {
+    mqttTopicAlias: "별칭 (선택 사항)",
     title: "새 연결",
     name: "이름",
     namePlaceholder: "연결 이름, 비워두면 자동 생성",
