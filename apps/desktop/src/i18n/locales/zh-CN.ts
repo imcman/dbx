@@ -4615,6 +4615,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "不用了",
     proposalConfirmTitle: "需要确认是否执行以下操作",
     toolApproval: {
+      allArguments: "完整参数",
       prompt: "「{plugin}」请求在「{connection}」上运行 {tool}，请核对下面的参数。",
       approve: "允许本次",
       deny: "拒绝",

@@ -3740,6 +3740,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "Nie, dziękuję",
     proposalConfirmTitle: "Wymagane potwierdzenie działania",
     toolApproval: {
+      allArguments: "Wszystkie argumenty",
       prompt: "Wtyczka {plugin} chce uruchomić {tool} na połączeniu {connection}. Sprawdź poniższe argumenty.",
       approve: "Zezwól jednorazowo",
       deny: "Odrzuć",

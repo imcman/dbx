@@ -4473,6 +4473,7 @@ export default withEnglishFallback({
     searchDatabases: "データベースを検索…",
     noDatabasesFound: "データベースが見つかりません",
     toolApproval: {
+      allArguments: "すべての引数",
       prompt: "「{plugin}」が「{connection}」で {tool} を実行しようとしています。以下の引数を確認してください。",
       approve: "今回のみ許可",
       deny: "拒否",

@@ -4347,6 +4347,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "Нет, спасибо",
     proposalConfirmTitle: "Требуется подтверждение действия",
     toolApproval: {
+      allArguments: "Все аргументы",
       prompt: "{plugin} хочет выполнить {tool} на {connection}. Проверьте аргументы ниже.",
       approve: "Разрешить один раз",
       deny: "Отклонить",

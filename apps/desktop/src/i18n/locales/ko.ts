@@ -4190,6 +4190,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "아니오",
     proposalConfirmTitle: "작업 확인이 필요합니다",
     toolApproval: {
+      allArguments: "전체 인수",
       prompt: "{plugin}이(가) {connection}에서 {tool}을(를) 실행하려고 합니다. 아래 인수를 확인하세요.",
       approve: "이번만 허용",
       deny: "거부",

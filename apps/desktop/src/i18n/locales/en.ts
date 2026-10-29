@@ -4689,6 +4689,7 @@ export default {
     proposalConfirmNo: "No thanks",
     proposalConfirmTitle: "Action confirmation required",
     toolApproval: {
+      allArguments: "All arguments",
       prompt: "{plugin} wants to run {tool} on {connection}. Review the arguments below.",
       approve: "Allow once",
       deny: "Deny",

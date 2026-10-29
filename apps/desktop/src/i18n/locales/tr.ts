@@ -3336,6 +3336,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "Hayır, teşekkürler",
     proposalConfirmTitle: "Eylem onayı gerekli",
     toolApproval: {
+      allArguments: "Tüm bağımsız değişkenler",
       prompt: "{plugin}, {connection} üzerinde {tool} çalıştırmak istiyor. Aşağıdaki argümanları inceleyin.",
       approve: "Bir kez izin ver",
       deny: "Reddet",

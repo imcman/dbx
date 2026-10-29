@@ -3363,6 +3363,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "Xeyr, təşəkkürlər",
     proposalConfirmTitle: "Əməliyyatın təsdiqi tələb olunur",
     toolApproval: {
+      allArguments: "Bütün arqumentlər",
       prompt: "{plugin} {connection} üzərində {tool} icra etmək istəyir. Aşağıdakı arqumentləri yoxlayın.",
       approve: "Bir dəfə icazə ver",
       deny: "Rədd et",

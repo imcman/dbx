@@ -4497,6 +4497,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "ไม่ ขอบคุณ",
     proposalConfirmTitle: "ต้องยืนยันการดำเนินการ",
     toolApproval: {
+      allArguments: "อาร์กิวเมนต์ทั้งหมด",
       prompt: "{plugin} ต้องการเรียกใช้ {tool} บน {connection} ตรวจสอบอาร์กิวเมนต์ด้านล่าง",
       approve: "อนุญาตครั้งเดียว",
       deny: "ปฏิเสธ",

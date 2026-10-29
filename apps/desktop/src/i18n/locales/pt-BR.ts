@@ -4440,6 +4440,7 @@ export default withEnglishFallback({
     searchDatabases: "Pesquisar bancos de dados…",
     noDatabasesFound: "Nenhum banco de dados encontrado",
     toolApproval: {
+      allArguments: "Todos os argumentos",
       prompt: "{plugin} quer executar {tool} em {connection}. Revise os argumentos abaixo.",
       approve: "Permitir uma vez",
       deny: "Negar",

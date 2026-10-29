@@ -4596,6 +4596,7 @@ export default withEnglishFallback({
     searchDatabases: "Buscar bases de datos…",
     noDatabasesFound: "No se encontraron bases de datos",
     toolApproval: {
+      allArguments: "Todos los argumentos",
       prompt: "{plugin} quiere ejecutar {tool} en {connection}. Revisa los argumentos a continuación.",
       approve: "Permitir una vez",
       deny: "Denegar",

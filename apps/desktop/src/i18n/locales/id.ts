@@ -3692,6 +3692,7 @@ export default withEnglishFallback({
     proposalConfirmNo: "Tidak, terima kasih",
     proposalConfirmTitle: "Konfirmasi tindakan diperlukan",
     toolApproval: {
+      allArguments: "Semua argumen",
       prompt: "{plugin} ingin menjalankan {tool} pada {connection}. Tinjau argumen di bawah ini.",
       approve: "Izinkan sekali",
       deny: "Tolak",

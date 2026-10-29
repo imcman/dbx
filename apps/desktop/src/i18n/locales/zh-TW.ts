@@ -4303,6 +4303,7 @@ export default withEnglishFallback({
     exportMarkdown: "匯出為 Markdown",
     analysis: "AI 分析",
     toolApproval: {
+      allArguments: "完整參數",
       prompt: "「{plugin}」請求在「{connection}」上執行 {tool}，請核對下方的參數。",
       approve: "允許本次",
       deny: "拒絕",
