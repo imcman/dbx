@@ -1560,7 +1560,7 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
     let Some(db_error) = err.as_db_error() else {
         return err.to_string();
     };
-    let mut message = db_error.to_string();
+    let mut message = pg_db_error_to_string(db_error);
     // Carry the server-reported cursor position across the `db` layer's
     // `Result<_, String>` boundary; `query.rs` resolves it against the executed
     // statement and strips the suffix before the message reaches any client.
@@ -1577,7 +1577,7 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
 /// be resolved against the user's SQL and point at the wrong place.
 fn pg_error_to_string_plain(err: impl Into<PgError>) -> String {
     let err = err.into();
-    err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
+    err.as_db_error().map(pg_db_error_to_string).unwrap_or_else(|| err.to_string())
 }
 
 /// Tries each SQL tier in `tiers` in order (most-capable first), via `run`,
