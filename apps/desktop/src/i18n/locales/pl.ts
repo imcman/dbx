@@ -3028,6 +3028,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Tylko zaznaczone",
     transposeMultiRow: "Wyróżnij zaznaczone",
     transposeMultiRowHint: "Tylko zaznaczone: transponuje wybrane wiersze, a gdy nie ma zaznaczenia — wszystkie wczytane. Wyróżnij zaznaczone: transponuje wszystkie wczytane wiersze i wyróżnia wybrane.",
+    totalPages: "Liczba stron: {count}",
     rowsPerPageShort: " wierszy",
     columnDetails: "Szczegóły kolumny",
     tableInfo: "Informacje o tabeli",
