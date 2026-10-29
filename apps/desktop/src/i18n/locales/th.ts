@@ -1283,6 +1283,7 @@ export default withEnglishFallback({
     searchMatchMode: "การจับคู่การค้นหา",
     searchMatchModeFuzzy: "จับคู่อัจฉริยะ",
     searchMatchModeContains: "มีข้อความต่อเนื่อง",
+    searchMatchModeExact: "ชื่อตรงทั้งหมด",
     searchMatchModeTooltip: "ใช้กับชื่อ ความคิดเห็น และชื่อแทนในการค้นหาด้านบน การจับคู่อัจฉริยะรองรับตัวย่อและการข้ามอักขระ ส่วนข้อความต่อเนื่องต้องมีอักขระติดกัน (101 ไม่ตรงกับ 1001)",
     clearFilter: "ล้างตัวกรอง",
     locateTargetNotFound: "รายการนี้ไม่พร้อมใช้งานในแถบด้านข้าง อาจถูกลบหรือซ่อนไว้",

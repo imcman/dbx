@@ -1417,6 +1417,7 @@ export default {
     searchMatchMode: "Search matching",
     searchMatchModeFuzzy: "Smart matching",
     searchMatchModeContains: "Contains text",
+    searchMatchModeExact: "Exact name",
     searchMatchModeTooltip: "Applies to names, comments and aliases in the top search. Smart matching allows abbreviations and skipped characters; contains text requires consecutive characters (101 does not match 1001).",
     clearFilter: "Clear filter",
     locateTargetNotFound: "The item is not available in the sidebar. It may have been removed or hidden.",

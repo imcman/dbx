@@ -43,21 +43,21 @@ function findNodePath(nodes: readonly TreeNode[], targetNodeId: string, ancestor
   return undefined;
 }
 
-function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatcher, searchableNodeTypes?: ReadonlySet<TreeNodeType>): boolean {
+function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatcher, searchableNodeTypes?: ReadonlySet<TreeNodeType>, exactNameOnly = false): boolean {
   if (searchableNodeTypes && !searchableNodeTypes.has(node.type)) return false;
-  return preserveMatchedSubtreeTypes.has(node.type) && !!bestMatch(matchLabel, normalizedLabel(node), node.comment, node.searchAliases);
+  return preserveMatchedSubtreeTypes.has(node.type) && (!exactNameOnly || node.type === "table" || node.type === "view") && !!bestMatch(matchLabel, normalizedLabel(node), exactNameOnly ? undefined : node.comment, exactNameOnly ? undefined : node.searchAliases);
 }
 
 export function createSidebarSearchSubtreePreserver(query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): (node: TreeNode) => boolean {
   const matchLabel = query ? createSidebarLabelMatcher(query, options) : undefined;
-  return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes);
+  return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes, options?.matchMode === "exact" && !options.regexMode);
 }
 
 export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], targetNodeId: string, query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): string {
   if (!query) return query;
   const matchLabel = createSidebarLabelMatcher(query, options);
   const path = findNodePath(nodes, targetNodeId);
-  const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes));
+  const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes, options?.matchMode === "exact" && !options.regexMode));
   return preservesSubtree ? "" : query;
 }
 
@@ -72,7 +72,7 @@ export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds
   const matcherOptions = typeof options === "function" ? undefined : options;
   const matchLabel = query ? createSidebarLabelMatcher(query, matcherOptions) : undefined;
   if (!matchLabel && searchableNodeTypes === undefined) return nodes;
-  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query);
+  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, matcherOptions?.matchMode === "exact" && !matcherOptions.regexMode);
 }
 
 export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: readonly TreeNode[]): TreeNode[] {
@@ -431,7 +431,7 @@ function isUnloadedTypeFilterContainer(node: TreeNode, searchableNodeTypes: Read
   return false;
 }
 
-function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string): TreeNode[] {
+function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string, exactNameOnly = false): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
@@ -457,10 +457,10 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
 
     const label = normalizedLabel(node, resolveLabel);
     const canSelfMatch = (!searchableNodeTypes || searchableNodeTypes.has(node.type)) && !hiddenUtility;
-    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment, node.searchAliases) : { score: 0 }) : null;
+    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, exactNameOnly ? undefined : node.comment, exactNameOnly ? undefined : node.searchAliases) : { score: 0 }) : null;
     // Type-only filtering keeps matching rows and their ancestor path, but not
     // unrelated descendants that would make the selected type appear ignored.
-    const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);
+    const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type) && (!exactNameOnly || node.type === "table" || node.type === "view");
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
@@ -470,7 +470,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // Connection utility entries are synthetic navigation actions, not schema
     // search results. Keep real loaded descendants for connection-name matches,
     // but do not let those actions make a disconnected result look expanded.
-    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query) : undefined;
+    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, exactNameOnly) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0) || isUnloadedContainer) {
       if (!node.children || preservesTypeMatchedTable || isUnloadedContainer) {

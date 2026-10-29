@@ -523,6 +523,7 @@ export default withEnglishFallback({
     searchMatchMode: "Axtarış uyğunluğu",
     searchMatchModeFuzzy: "Ağıllı uyğunluq",
     searchMatchModeContains: "Ardıcıl mətn ehtiva edir",
+    searchMatchModeExact: "Dəqiq ad",
     searchMatchModeTooltip: "Yuxarı axtarışdakı adlara, şərhlərə və ləqəblərə tətbiq edilir. Ağıllı uyğunluq qısaltmalara və buraxılmış simvollara icazə verir; ardıcıl mətn bitişik simvollar tələb edir (101, 1001 ilə uyğun gəlmir).",
     clearFilter: "Süzgəci təmizlə",
     locateTargetNotFound: "Element yan paneldə mövcud deyil. O, silinmiş və ya gizlədilmiş ola bilər.",

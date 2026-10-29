@@ -1188,7 +1188,7 @@ export interface EditorSettings {
   sidebarMenuHiddenPrimaryActions: SidebarMenuPinnedActions;
   sidebarMenuOrder: SidebarMenuOrder;
   sidebarConnectionSortMode: ConnectionListSortMode;
-  sidebarSearchMatchMode: "fuzzy" | "contains";
+  sidebarSearchMatchMode: "fuzzy" | "contains" | "exact";
   sidebarObjectDisplay: "grouped" | "simple";
   routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
@@ -2268,7 +2268,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarMenuHiddenPrimaryActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuHiddenPrimaryActions),
     sidebarMenuOrder: normalizeSidebarMenuOrder(settings.sidebarMenuOrder),
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
-    sidebarSearchMatchMode: settings.sidebarSearchMatchMode === "contains" ? "contains" : "fuzzy",
+    sidebarSearchMatchMode: settings.sidebarSearchMatchMode === "contains" || settings.sidebarSearchMatchMode === "exact" ? settings.sidebarSearchMatchMode : "fuzzy",
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
@@ -3222,7 +3222,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarMenuHiddenPrimaryActions !== undefined) editorSettings.value.sidebarMenuHiddenPrimaryActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuHiddenPrimaryActions);
     if (partial.sidebarMenuOrder !== undefined) editorSettings.value.sidebarMenuOrder = normalizeSidebarMenuOrder(partial.sidebarMenuOrder);
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
-    if (partial.sidebarSearchMatchMode !== undefined) editorSettings.value.sidebarSearchMatchMode = partial.sidebarSearchMatchMode === "contains" ? "contains" : "fuzzy";
+    if (partial.sidebarSearchMatchMode !== undefined) editorSettings.value.sidebarSearchMatchMode = partial.sidebarSearchMatchMode === "contains" || partial.sidebarSearchMatchMode === "exact" ? partial.sidebarSearchMatchMode : "fuzzy";
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;

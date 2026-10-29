@@ -1203,6 +1203,7 @@ export default withEnglishFallback({
     searchMatchMode: "検索の一致方法",
     searchMatchModeFuzzy: "スマート一致",
     searchMatchModeContains: "連続した文字列",
+    searchMatchModeExact: "名前の完全一致",
     searchMatchModeTooltip: "上部検索の名前、コメント、別名に適用します。スマート一致は略語や文字の省略を許可し、連続した文字列では 101 は 1001 に一致しません。",
     clearFilter: "フィルターをクリア",
     locateTargetNotFound: "サイドバーに該当する項目が見つかりません。削除または非表示にされている可能性があります。",

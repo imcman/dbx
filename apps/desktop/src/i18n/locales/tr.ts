@@ -523,6 +523,7 @@ export default withEnglishFallback({
     searchMatchMode: "Arama eşleştirme",
     searchMatchModeFuzzy: "Akıllı eşleştirme",
     searchMatchModeContains: "Ardışık metin içerir",
+    searchMatchModeExact: "Tam ad",
     searchMatchModeTooltip: "Üst aramadaki adlara, yorumlara ve takma adlara uygulanır. Akıllı eşleştirme kısaltmalara ve atlanan karakterlere izin verir; ardışık metin bitişik karakterler gerektirir (101, 1001 ile eşleşmez).",
     clearFilter: "Filtreyi temizle",
     locateTargetNotFound: "Öğe kenar çubuğunda bulunamıyor. Silinmiş veya gizlenmiş olabilir.",

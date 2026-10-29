@@ -1183,6 +1183,7 @@ export default withEnglishFallback({
     searchMatchMode: "Сопоставление поиска",
     searchMatchModeFuzzy: "Умное сопоставление",
     searchMatchModeContains: "Непрерывное вхождение",
+    searchMatchModeExact: "Точное имя",
     searchMatchModeTooltip: "Применяется к именам, комментариям и псевдонимам в верхнем поиске. Умное сопоставление допускает сокращения и пропуск символов; непрерывное вхождение требует последовательных символов (101 не совпадает с 1001).",
     clearFilter: "Очистить фильтр",
     locateTargetNotFound: "Элемент недоступен на боковой панели. Возможно, он был удалён или скрыт.",

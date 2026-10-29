@@ -1209,6 +1209,7 @@ export default withEnglishFallback({
     searchMatchMode: "검색 일치 방식",
     searchMatchModeFuzzy: "스마트 일치",
     searchMatchModeContains: "연속 문자열 포함",
+    searchMatchModeExact: "이름 정확히 일치",
     searchMatchModeTooltip: "상단 검색의 이름, 설명, 별칭에 적용됩니다. 스마트 일치는 약어와 문자 생략을 허용하며, 연속 문자열 포함에서는 101이 1001과 일치하지 않습니다.",
     clearFilter: "필터 지우기",
     locateTargetNotFound: "사이드바에서 해당 항목을 찾을 수 없습니다. 삭제되었거나 숨겨져 있을 수 있습니다.",

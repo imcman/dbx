@@ -1214,6 +1214,7 @@ export default withEnglishFallback({
     searchMatchMode: "Coincidencia de búsqueda",
     searchMatchModeFuzzy: "Coincidencia inteligente",
     searchMatchModeContains: "Contiene texto continuo",
+    searchMatchModeExact: "Nombre exacto",
     searchMatchModeTooltip: "Se aplica a nombres, comentarios y alias en la búsqueda superior. La coincidencia inteligente admite abreviaturas y caracteres omitidos; el texto continuo exige caracteres consecutivos (101 no coincide con 1001).",
     clearFilter: "Limpiar filtro",
     locateTargetNotFound: "El elemento no está disponible en la barra lateral. Puede que se haya eliminado u ocultado.",

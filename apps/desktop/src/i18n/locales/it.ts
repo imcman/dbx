@@ -1202,6 +1202,7 @@ export default withEnglishFallback({
     searchMatchMode: "Corrispondenza ricerca",
     searchMatchModeFuzzy: "Corrispondenza intelligente",
     searchMatchModeContains: "Contiene testo continuo",
+    searchMatchModeExact: "Nome esatto",
     searchMatchModeTooltip: "Si applica a nomi, commenti e alias nella ricerca superiore. La corrispondenza intelligente ammette abbreviazioni e caratteri omessi; il testo continuo richiede caratteri consecutivi (101 non corrisponde a 1001).",
     clearFilter: "Cancella filtro",
     locateTargetNotFound: "L’elemento non è disponibile nella barra laterale. Potrebbe essere stato rimosso o nascosto.",

@@ -1353,6 +1353,7 @@ export default withEnglishFallback({
     searchMatchMode: "搜索匹配",
     searchMatchModeFuzzy: "智能匹配",
     searchMatchModeContains: "连续包含",
+    searchMatchModeExact: "精确匹配名称",
     searchMatchModeTooltip: "作用于顶部搜索的名称、备注和别名。智能匹配支持缩写和跳字；连续包含要求字符连续出现，例如 101 不匹配 1001。",
     clearFilter: "清除筛选",
     locateTargetNotFound: "左侧导航中未找到对应项目，该项目可能已被删除或隐藏。",

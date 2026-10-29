@@ -788,6 +788,7 @@ export default withEnglishFallback({
     searchMatchMode: "Dopasowanie wyszukiwania",
     searchMatchModeFuzzy: "Inteligentne dopasowanie",
     searchMatchModeContains: "Zawiera ciągły tekst",
+    searchMatchModeExact: "Dokładna nazwa",
     searchMatchModeTooltip: "Dotyczy nazw, komentarzy i aliasów w górnym wyszukiwaniu. Inteligentne dopasowanie dopuszcza skróty i pomijanie znaków; ciągły tekst wymaga kolejnych znaków (101 nie pasuje do 1001).",
     clearFilter: "Wyczyść filtr",
     locateTargetNotFound: "Pozycja nie jest dostępna w panelu bocznym. Mogła zostać usunięta lub ukryta.",

@@ -728,6 +728,7 @@ export default withEnglishFallback({
     searchMatchMode: "Pencocokan pencarian",
     searchMatchModeFuzzy: "Pencocokan cerdas",
     searchMatchModeContains: "Mengandung teks berurutan",
+    searchMatchModeExact: "Nama persis",
     searchMatchModeTooltip: "Berlaku untuk nama, komentar, dan alias di pencarian atas. Pencocokan cerdas mendukung singkatan dan karakter yang dilewati; teks berurutan memerlukan karakter bersebelahan (101 tidak cocok dengan 1001).",
     clearFilter: "Bersihkan filter",
     locateTargetNotFound: "Item tidak tersedia di bilah sisi. Item mungkin telah dihapus atau disembunyikan.",

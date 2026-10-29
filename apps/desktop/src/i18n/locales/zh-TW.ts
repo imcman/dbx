@@ -1188,6 +1188,7 @@ export default withEnglishFallback({
     searchMatchMode: "搜尋比對",
     searchMatchModeFuzzy: "智慧比對",
     searchMatchModeContains: "連續包含",
+    searchMatchModeExact: "精確比對名稱",
     searchMatchModeTooltip: "套用於頂部搜尋的名稱、備註和別名。智慧比對支援縮寫與跳字；連續包含要求字元連續出現，例如 101 不比對 1001。",
     clearFilter: "清除篩選",
     locateTargetNotFound: "側邊欄中找不到對應項目，該項目可能已被刪除或隱藏。",
