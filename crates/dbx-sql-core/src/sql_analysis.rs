@@ -186,7 +186,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
 
     let parsed_statements = match normalized_dialect.as_str() {
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
-        "mysql" => Parser::parse_sql(&MySqlDialect {}, &parser_sql),
+        "mysql" => parse_mysql(&parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
         "sqlserver" => parse_sqlserver(&parser_sql),
         "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
@@ -241,6 +241,58 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         analysis.group_by_violations.clear();
     }
     Ok(analysis)
+}
+
+/// sqlparser 0.62 does not implement MySQL's ALTER TABLE COMMENT table option.
+/// Validate only that complete statement form, then leave all other statements
+/// to the normal parser. Original token spans (including later statements) survive.
+fn parse_mysql(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = MySqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(statements) => Ok(statements),
+        Err(original_error) => {
+            let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+            let mut remaining = Vec::with_capacity(tokens.len());
+            let mut start = 0;
+            let mut changed = false;
+            for end in 0..=tokens.len() {
+                if end < tokens.len() && !matches!(tokens[end].token, Token::SemiColon | Token::EOF) {
+                    continue;
+                }
+                let statement = &tokens[start..end];
+                if is_mysql_table_comment(statement) {
+                    changed = true;
+                } else {
+                    remaining.extend_from_slice(statement);
+                }
+                if end < tokens.len() {
+                    remaining.push(tokens[end].clone());
+                }
+                start = end + 1;
+            }
+            if !changed {
+                return Err(original_error);
+            }
+            Parser::new(&dialect).with_tokens_with_locations(remaining).parse_statements()
+        }
+    }
+}
+
+fn is_mysql_table_comment(tokens: &[TokenWithSpan]) -> bool {
+    let dialect = MySqlDialect {};
+    let mut parser = Parser::new(&dialect).with_tokens_with_locations(tokens.to_vec());
+    if !parser.parse_keywords(&[Keyword::ALTER, Keyword::TABLE]) {
+        return false;
+    }
+    let Ok(name) = parser.parse_object_name(false) else { return false };
+    if name.0.len() > 2 || !parser.parse_keyword(Keyword::COMMENT) {
+        return false;
+    }
+    let _ = parser.consume_token(&Token::Eq);
+    if !matches!(parser.next_token().token, Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)) {
+        return false;
+    }
+    matches!(parser.next_token().token, Token::EOF)
 }
 
 fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
@@ -2008,5 +2060,56 @@ mod sql_text_span_tests {
         assert_eq!(violation.span.start_column, 8);
         assert_eq!(violation.span.end_line, 1);
         assert_eq!(violation.span.end_column, 14);
+    }
+}
+
+#[cfg(test)]
+mod mysql_table_comment_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_mysql_table_comment_options() {
+        for sql in [
+            "ALTER TABLE yrisk_source COMMENT '风险源定义';",
+            "ALTER TABLE t COMMENT = \"double quoted\";",
+            "ALTER TABLE t COMMENT 'it\\'s escaped';",
+            "CREATE TABLE t (id INT COMMENT 'column') COMMENT='table';",
+            "SELECT 'ALTER TABLE t COMMENT' AS text;",
+            "ALTER TABLE `db`.`table` COMMENT = 'it''s a table';",
+            "/* before */ alter table t comment /* between */ = ''; -- after",
+            "ALTER TABLE t COMMENT 'semi;colon'; SELECT u.id FROM users u;",
+        ] {
+            assert!(analyze_sql_references(sql, Some("mysql")).is_ok(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn keeps_mysql_comment_errors_and_other_statements_visible() {
+        for sql in [
+            "ALTER TABLE t COMMENT;",
+            "ALTER TABLE t COMMENT =;",
+            "ALTER TABLE t COMMENT 123;",
+            "ALTER TABLE t COMMENT NULL;",
+            "ALTER TABLE t COMMENT 'x' COMMENT 'y';",
+            "ALTER TABLE t COMMENT 'x'; SELECT * FROM;",
+            "SELECT FROM; ALTER TABLE t COMMENT 'x';",
+            "ALTER TABLE t COMMENT 'x' garbage;",
+            "ALTER TABLE t COMMENT 'unterminated",
+            "ALTER TABLE t COMMENT 'x'; SELECT FROM;",
+            "ALTER TABLE t COMMENT 'x', ADD COLUMN;",
+        ] {
+            assert!(analyze_sql_references(sql, Some("mysql")).is_err(), "{sql}");
+        }
+        assert!(analyze_sql_references("ALTER TABLE t COMMENT 'x'", Some("postgres")).is_err());
+    }
+
+    #[test]
+    fn preserves_reference_spans_after_mysql_comment() {
+        let sql = "ALTER TABLE t COMMENT '注释';\nSELECT u.id FROM users u";
+        let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 2);
+        assert_eq!(analysis.columns[0].name, "id");
+        assert_eq!(analysis.columns[0].span.start_line, 2);
     }
 }
