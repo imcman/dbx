@@ -220,22 +220,23 @@ type TableSearchFocusRestore = {
   selection: TableSearchSelection | null;
 };
 
+function resetSearchExpandedIdsForQueryChange(value: string, previousValue: string) {
+  const normalized = regexMode.value ? value.trim() : value.trim().toLowerCase();
+  const previousNormalized = regexMode.value ? previousValue.trim() : previousValue.trim().toLowerCase();
+  if (!normalized || normalized !== previousNormalized) searchExpandedIds.value = new Set();
+}
+
 watch(
   searchQuery,
   (value, previousValue) => {
     const normalized = regexMode.value ? value.trim() : value.trim().toLowerCase();
     window.clearTimeout(searchTimer);
+    resetSearchExpandedIdsForQueryChange(value, previousValue);
 
     if (!normalized) {
-      searchExpandedIds.value = new Set();
       deferredSearchQuery.value = "";
       return;
     }
-
-    // Every new search starts with partition groups closed. An explicit toggle
-    // adds the group to searchExpandedIds so subsequent projection updates keep
-    // the user's choice.
-    if (!previousValue.trim()) searchExpandedIds.value = new Set();
 
     searchTimer = window.setTimeout(() => {
       deferredSearchQuery.value = normalized;

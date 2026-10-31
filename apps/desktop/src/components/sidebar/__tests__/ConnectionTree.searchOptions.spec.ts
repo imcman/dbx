@@ -17,6 +17,7 @@ afterEach(() => {
 });
 
 const compiled = compileConnectionTreeTestScript(["searchMatchMode", "isConnectionListAlphabeticallySorted", "sidebarListOptionsLabel", "sidebarListOptionItems", "selectedSidebarListOptions", "hasCustomSidebarListOptions", "selectSidebarListOption"]);
+const compiledSearchExpansion = compileConnectionTreeTestScript(["resetSearchExpandedIdsForQueryChange"]);
 
 async function mount() {
   const settingsStore = useSettingsStore(createPinia());
@@ -128,6 +129,18 @@ it("offers exact-name matching without changing the default fuzzy behavior", asy
   option("Smart matching").click();
   await nextTick();
   expect(matchSidebarLabel("orders_backup", "orders", { matchMode: view.settingsStore.editorSettings.sidebarSearchMatchMode })).not.toBeNull();
+});
+
+it("resets partition expansion when the non-empty search query changes", () => {
+  const searchExpandedIds = ref(new Set(["orders:__partitions"]));
+  const regexMode = ref(false);
+  const bindings = { regexMode, searchExpandedIds };
+  const reset = new Function(...Object.keys(bindings), `${compiledSearchExpansion}; return resetSearchExpandedIdsForQueryChange;`)(...Object.values(bindings)) as (value: string, previousValue: string) => void;
+
+  reset("orders", "orders");
+  expect(searchExpandedIds.value).toEqual(new Set(["orders:__partitions"]));
+  reset("customers", "orders");
+  expect(searchExpandedIds.value).toEqual(new Set());
 });
 
 it("filters globally indexed names exactly while retaining regex comment matching", () => {
