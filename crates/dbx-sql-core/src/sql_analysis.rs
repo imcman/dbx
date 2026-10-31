@@ -260,7 +260,10 @@ fn parse_mysql(sql: &str) -> Result<Vec<Statement>, ParserError> {
                     continue;
                 }
                 let statement = &tokens[start..end];
-                if is_mysql_table_comment(statement) {
+                if let Some(stripped) = strip_mysql_table_comment_if_parseable(statement) {
+                    remaining.extend(stripped);
+                    changed = true;
+                } else if is_mysql_table_comment(statement) {
                     changed = true;
                 } else {
                     remaining.extend_from_slice(statement);
@@ -276,6 +279,59 @@ fn parse_mysql(sql: &str) -> Result<Vec<Statement>, ParserError> {
             Parser::new(&dialect).with_tokens_with_locations(remaining).parse_statements()
         }
     }
+}
+
+fn strip_mysql_table_comment_if_parseable(tokens: &[TokenWithSpan]) -> Option<Vec<TokenWithSpan>> {
+    let dialect = MySqlDialect {};
+    let alter_index = next_significant_token_index(tokens, 0)?;
+    if unquoted_token_keyword(&tokens[alter_index]) != Some(Keyword::ALTER) {
+        return None;
+    }
+    let table_index = next_significant_token_index(tokens, alter_index + 1)?;
+    if unquoted_token_keyword(&tokens[table_index]) != Some(Keyword::TABLE) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for index in table_index + 1..tokens.len() {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::COMMENT) => {
+                let mut value_index = next_significant_token_index(tokens, index + 1)?;
+                if matches!(tokens[value_index].token, Token::Eq) {
+                    value_index = next_significant_token_index(tokens, value_index + 1)?;
+                }
+                if !matches!(tokens[value_index].token, Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)) {
+                    continue;
+                }
+
+                let next_index = next_significant_token_index(tokens, value_index + 1);
+                if next_index.is_some_and(|index| !matches!(tokens[index].token, Token::Comma)) {
+                    continue;
+                }
+
+                let previous_index =
+                    (0..index).rev().find(|index| !matches!(tokens[*index].token, Token::Whitespace(_)));
+                let (range_start, range_end) =
+                    if previous_index.is_some_and(|index| matches!(tokens[index].token, Token::Comma)) {
+                        (previous_index.expect("checked above"), value_index)
+                    } else if next_index.is_some() {
+                        (index, next_index.expect("checked above"))
+                    } else {
+                        (index, value_index)
+                    };
+
+                let mut stripped = tokens.to_vec();
+                stripped.drain(range_start..=range_end);
+                if Parser::new(&dialect).with_tokens_with_locations(stripped.clone()).parse_statements().is_ok() {
+                    return Some(stripped);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_mysql_table_comment(tokens: &[TokenWithSpan]) -> bool {
@@ -2078,6 +2134,8 @@ mod mysql_table_comment_tests {
             "ALTER TABLE `db`.`table` COMMENT = 'it''s a table';",
             "/* before */ alter table t comment /* between */ = ''; -- after",
             "ALTER TABLE t COMMENT 'semi;colon'; SELECT u.id FROM users u;",
+            "ALTER TABLE t COMMENT='x', ADD COLUMN c INT; SELECT * FROM users",
+            "ALTER TABLE t ADD COLUMN c INT, COMMENT='x'; SELECT * FROM users",
         ] {
             assert!(analyze_sql_references(sql, Some("mysql")).is_ok(), "{sql}");
         }
@@ -2097,6 +2155,7 @@ mod mysql_table_comment_tests {
             "ALTER TABLE t COMMENT 'unterminated",
             "ALTER TABLE t COMMENT 'x'; SELECT FROM;",
             "ALTER TABLE t COMMENT 'x', ADD COLUMN;",
+            "ALTER TABLE t COMMENT='x' ADD COLUMN c INT;",
         ] {
             assert!(analyze_sql_references(sql, Some("mysql")).is_err(), "{sql}");
         }
