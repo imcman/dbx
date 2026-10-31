@@ -306,6 +306,10 @@ fn strip_mysql_table_comment_if_parseable(tokens: &[TokenWithSpan]) -> Option<Ve
                     continue;
                 }
 
+                if mysql_alter_table_options_are_valid(tokens) {
+                    return Some(Vec::new());
+                }
+
                 let next_index = next_significant_token_index(tokens, value_index + 1);
                 if next_index.is_some_and(|index| !matches!(tokens[index].token, Token::Comma)) {
                     continue;
@@ -332,6 +336,119 @@ fn strip_mysql_table_comment_if_parseable(tokens: &[TokenWithSpan]) -> Option<Ve
         }
     }
     None
+}
+
+fn mysql_alter_table_options_are_valid(tokens: &[TokenWithSpan]) -> bool {
+    let dialect = MySqlDialect {};
+    let mut parser = Parser::new(&dialect).with_tokens_with_locations(tokens.to_vec());
+    if !parser.parse_keywords(&[Keyword::ALTER, Keyword::TABLE]) {
+        return false;
+    }
+    if parser.parse_object_name(false).is_err() {
+        return false;
+    }
+    let option_start = parser.peek_token_ref().span;
+    let Some(mut index) = tokens.iter().position(|token| token.span == option_start) else {
+        return false;
+    };
+    let mut saw_comment = false;
+    let mut saw_option = false;
+
+    while let Some(current) = next_significant_token_index(tokens, index) {
+        let keyword = unquoted_token_keyword(&tokens[current]);
+        if keyword == Some(Keyword::COMMENT) {
+            if saw_comment {
+                return false;
+            }
+            saw_comment = true;
+        }
+        if matches!(tokens[current].token, Token::Comma) {
+            if !saw_option {
+                return false;
+            }
+            let Some(next) = next_significant_token_index(tokens, current + 1) else {
+                return false;
+            };
+            if matches!(tokens[next].token, Token::Comma) {
+                return false;
+            }
+            index = next;
+            continue;
+        }
+
+        let Some(next_index) = mysql_table_option_value_start(tokens, current, keyword) else {
+            return false;
+        };
+        saw_option = true;
+        index = next_index + 1;
+    }
+
+    saw_option && saw_comment
+}
+
+fn mysql_table_option_value_start(
+    tokens: &[TokenWithSpan],
+    key_index: usize,
+    keyword: Option<Keyword>,
+) -> Option<usize> {
+    let mut value_index = key_index + 1;
+    match keyword {
+        Some(Keyword::DEFAULT) => {
+            let modifier = next_significant_token_index(tokens, value_index)?;
+            if !matches!(unquoted_token_keyword(&tokens[modifier]), Some(Keyword::CHARSET | Keyword::CHARACTER)) {
+                return None;
+            }
+            value_index = modifier + 1;
+            if unquoted_token_keyword(&tokens[modifier]) == Some(Keyword::CHARACTER) {
+                let set_index = next_significant_token_index(tokens, value_index)?;
+                if unquoted_token_keyword(&tokens[set_index]) != Some(Keyword::SET) {
+                    return None;
+                }
+                value_index = set_index + 1;
+            }
+        }
+        Some(Keyword::CHARACTER) => {
+            let set_index = next_significant_token_index(tokens, value_index)?;
+            if unquoted_token_keyword(&tokens[set_index]) != Some(Keyword::SET) {
+                return None;
+            }
+            value_index = set_index + 1;
+        }
+        Some(
+            Keyword::AUTO_INCREMENT
+            | Keyword::CHARSET
+            | Keyword::COLLATE
+            | Keyword::COMMENT
+            | Keyword::COMPRESSION
+            | Keyword::CONNECTION
+            | Keyword::ENGINE
+            | Keyword::ENCRYPTION
+            | Keyword::INSERT_METHOD
+            | Keyword::KEY_BLOCK_SIZE
+            | Keyword::MAX_ROWS
+            | Keyword::MIN_ROWS
+            | Keyword::PACK_KEYS
+            | Keyword::PASSWORD
+            | Keyword::ROW_FORMAT
+            | Keyword::STATS_AUTO_RECALC
+            | Keyword::STATS_PERSISTENT
+            | Keyword::STATS_SAMPLE_PAGES
+            | Keyword::TABLESPACE,
+        ) => {}
+        _ => return None,
+    }
+
+    let separator = next_significant_token_index(tokens, value_index)?;
+    let value_index = if matches!(tokens[separator].token, Token::Eq) {
+        next_significant_token_index(tokens, separator + 1)?
+    } else {
+        separator
+    };
+    matches!(
+        tokens[value_index].token,
+        Token::Word(_) | Token::Number(_, _) | Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)
+    )
+    .then_some(value_index)
 }
 
 fn is_mysql_table_comment(tokens: &[TokenWithSpan]) -> bool {
@@ -2136,6 +2253,9 @@ mod mysql_table_comment_tests {
             "ALTER TABLE t COMMENT 'semi;colon'; SELECT u.id FROM users u;",
             "ALTER TABLE t COMMENT='x', ADD COLUMN c INT; SELECT * FROM users",
             "ALTER TABLE t ADD COLUMN c INT, COMMENT='x'; SELECT * FROM users",
+            "ALTER TABLE t ENGINE=InnoDB COMMENT='x'; SELECT * FROM users",
+            "ALTER TABLE t COMMENT='x' ROW_FORMAT=DYNAMIC; SELECT * FROM users",
+            "ALTER TABLE t DEFAULT CHARACTER SET=utf8mb4 COMMENT='x'; SELECT * FROM users",
         ] {
             assert!(analyze_sql_references(sql, Some("mysql")).is_ok(), "{sql}");
         }
@@ -2156,6 +2276,8 @@ mod mysql_table_comment_tests {
             "ALTER TABLE t COMMENT 'x'; SELECT FROM;",
             "ALTER TABLE t COMMENT 'x', ADD COLUMN;",
             "ALTER TABLE t COMMENT='x' ADD COLUMN c INT;",
+            "ALTER TABLE t COMMENT='x' COMMENT='y';",
+            "ALTER TABLE t COMMENT='x',",
         ] {
             assert!(analyze_sql_references(sql, Some("mysql")).is_err(), "{sql}");
         }
