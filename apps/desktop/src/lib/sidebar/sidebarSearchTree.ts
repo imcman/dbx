@@ -442,7 +442,16 @@ function isUnloadedTypeFilterContainer(node: TreeNode, searchableNodeTypes: Read
   return false;
 }
 
-function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string, exactNameOnly = false, searchExpandedIds?: ReadonlySet<string>): TreeNode[] {
+function filterSidebarTreeWithMatcher(
+  nodes: TreeNode[],
+  matchLabel: SidebarLabelMatcher | undefined,
+  collapsedIds: ReadonlySet<string>,
+  searchableNodeTypes?: ReadonlySet<TreeNodeType>,
+  resolveLabel?: (node: TreeNode) => string,
+  query?: string,
+  exactNameOnly = false,
+  searchExpandedIds?: ReadonlySet<string>,
+): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
