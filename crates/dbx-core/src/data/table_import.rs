@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -1952,7 +1952,20 @@ fn sql_import_object_name_ident<'a>(name: &'a ObjectName, what: &str) -> Result<
     }
 }
 
-fn sql_import_number_value(raw: &str, context: &str) -> Result<serde_json::Value, String> {
+// Successful imports do not need an error message for every cell. Keep the
+// names borrowed and format them only when a literal fails validation.
+struct SqlImportValueContext<'a> {
+    table: &'a str,
+    column: &'a str,
+}
+
+impl std::fmt::Display for SqlImportValueContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SQL import: table '{}', column {}", self.table, self.column)
+    }
+}
+
+fn sql_import_number_value(raw: &str, context: &impl std::fmt::Display) -> Result<serde_json::Value, String> {
     // 优先保留整数精度；小数与科学计数法回退到浮点。
     if let Ok(integer) = raw.parse::<i64>() {
         return Ok(serde_json::Value::Number(integer.into()));
@@ -2010,11 +2023,11 @@ fn sql_import_current_timestamp_sql(db_type: &DatabaseType) -> &'static str {
     }
 }
 
-fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value, String> {
+fn sql_import_expr_value(expr: Expr, context: &impl std::fmt::Display) -> Result<serde_json::Value, String> {
     match expr {
-        Expr::Value(value) => match &value.value {
+        Expr::Value(value) => match value.value {
             SqlValue::Number(raw, _) => sql_import_number_value(raw.as_str(), context),
-            SqlValue::Boolean(flag) => Ok(serde_json::Value::Bool(*flag)),
+            SqlValue::Boolean(flag) => Ok(serde_json::Value::Bool(flag)),
             SqlValue::Null => Ok(serde_json::Value::Null),
             // 二进制/十六进制字面量无法无损地作为文本导入，明确拒绝而非静默改写。
             SqlValue::HexStringLiteral(_)
@@ -2024,7 +2037,7 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
             }
             SqlValue::Placeholder(_) => Err(format!("{context}: bind placeholders are not supported for SQL import")),
             // 普通字符串字面量：转义已由 sqlparser 按源方言正确解码。
-            other => match other.clone().into_string() {
+            other => match other.into_string() {
                 Some(text) => Ok(serde_json::Value::String(text)),
                 None => Err(format!("{context}: unsupported SQL literal")),
             },
@@ -2032,16 +2045,16 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
         // 一元正负号作用于数值字面量：`-1.5`、`+3` 等是合法值，不能当表达式拒绝。
         Expr::UnaryOp { op, expr } => match op {
             UnaryOperator::Minus => {
-                if let Expr::Value(value) = expr.as_ref() {
-                    if let SqlValue::Number(raw, _) = &value.value {
+                if let Expr::Value(value) = *expr {
+                    if let SqlValue::Number(raw, _) = value.value {
                         return sql_import_number_value(&format!("-{raw}"), context);
                     }
                 }
                 Err(sql_import_unsupported_expression(context))
             }
             UnaryOperator::Plus => {
-                if let Expr::Value(value) = expr.as_ref() {
-                    if let SqlValue::Number(raw, _) = &value.value {
+                if let Expr::Value(value) = *expr {
+                    if let SqlValue::Number(raw, _) = value.value {
                         return sql_import_number_value(raw.as_str(), context);
                     }
                 }
@@ -2053,10 +2066,10 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
         Expr::TypedString(typed) => sql_import_typed_string(typed, context),
         // 白名单字面量日期函数（TO_DATE/TO_TIMESTAMP/...）：参数全为字符串字面量时按第一个参数导入。
         Expr::Function(function) => {
-            if sql_import_is_current_timestamp_function(function) {
+            if sql_import_is_current_timestamp_function(&function) {
                 Ok(sql_import_current_timestamp_value())
             } else {
-                sql_import_literal_temporal_function(function, context)
+                sql_import_literal_temporal_function(&function, context)
             }
         }
         _ => Err(sql_import_unsupported_expression(context)),
@@ -2065,9 +2078,12 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
 
 /// `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 这类标准字面量：值就是引号里的字符串，
 /// 无损地作为字符串导入。其它 TypedString（如 INTERVAL）语义更复杂，不展开。
-fn sql_import_typed_string(typed: &sqlparser::ast::TypedString, context: &str) -> Result<serde_json::Value, String> {
+fn sql_import_typed_string(
+    typed: sqlparser::ast::TypedString,
+    context: &impl std::fmt::Display,
+) -> Result<serde_json::Value, String> {
     match &typed.data_type {
-        DataType::Date | DataType::Time(..) | DataType::Timestamp(..) => match typed.value.clone().into_string() {
+        DataType::Date | DataType::Time(..) | DataType::Timestamp(..) => match typed.value.into_string() {
             Some(text) => Ok(serde_json::Value::String(text)),
             None => Err(sql_import_unsupported_expression(context)),
         },
@@ -2081,7 +2097,7 @@ fn sql_import_typed_string(typed: &sqlparser::ast::TypedString, context: &str) -
 /// 避免静默改变语句语义。
 fn sql_import_literal_temporal_function(
     function: &sqlparser::ast::Function,
-    context: &str,
+    context: &impl std::fmt::Display,
 ) -> Result<serde_json::Value, String> {
     let name = function.name.to_string().to_ascii_lowercase();
     if !matches!(name.as_str(), "to_date" | "to_timestamp" | "to_timestamp_tz") {
@@ -2109,7 +2125,7 @@ fn sql_import_literal_temporal_function(
     Ok(serde_json::Value::String(value))
 }
 
-fn sql_import_unsupported_expression(context: &str) -> String {
+fn sql_import_unsupported_expression(context: &impl std::fmt::Display) -> String {
     format!(
         "{context}: expressions (functions, operators, casts, ...) are not supported; \
          SQL import only accepts literal values so statement semantics are preserved"
@@ -2120,7 +2136,7 @@ fn sql_import_unsupported_expression(context: &str) -> String {
 /// REPLACE、INSERT IGNORE、INSERT ... SELECT、INSERT ... SET、ON CONFLICT 等无法用
 /// 普通 INSERT 无损表达的构造一律拒绝。
 fn parse_sql_insert_statement(
-    insert: &Insert,
+    insert: Insert,
     family: SqlImportDialectFamily,
     target: &mut Option<SqlInsertTarget>,
     rows: &mut Vec<Vec<serde_json::Value>>,
@@ -2175,10 +2191,10 @@ fn parse_sql_insert_statement(
         })
         .collect::<Result<Vec<String>, String>>()?;
 
-    let Some(source) = insert.source.as_deref() else {
+    let Some(source) = insert.source else {
         return Err("SQL import only supports INSERT ... VALUES".to_string());
     };
-    let SetExpr::Values(values) = source.body.as_ref() else {
+    let SetExpr::Values(values) = *source.body else {
         return Err("SQL import only supports INSERT ... VALUES; INSERT ... SELECT is not supported".to_string());
     };
 
@@ -2209,8 +2225,8 @@ fn parse_sql_insert_statement(
         }
     }
 
-    for row in &values.rows {
-        let values = &row.content;
+    for row in values.rows {
+        let values = row.content;
         if target.is_none() {
             if values.is_empty() {
                 return Err("INSERT statement has an empty value tuple".to_string());
@@ -2228,8 +2244,10 @@ fn parse_sql_insert_statement(
             ));
         }
         let mut converted = Vec::with_capacity(values.len());
-        for (index, value) in values.iter().enumerate() {
-            let context = format!("SQL import: table '{table_name}', column {}", columns[index]);
+        // The parsed AST is owned by this import. Move string literals into the
+        // output rows instead of copying large payloads before dropping the AST.
+        for (index, value) in values.into_iter().enumerate() {
+            let context = SqlImportValueContext { table: &table_name, column: &columns[index] };
             converted.push(sql_import_expr_value(value, &context)?);
         }
         *total_rows += 1;
@@ -2347,7 +2365,7 @@ fn collect_sql_import_rows<'a>(
             let Statement::Insert(insert) = statement else {
                 continue;
             };
-            parse_sql_insert_statement(&insert, family, target, rows, preview_limit, total_rows)?;
+            parse_sql_insert_statement(insert, family, target, rows, preview_limit, total_rows)?;
         }
     }
     Ok(())
@@ -2382,6 +2400,15 @@ impl SqlImportRowStream {
         options: &TableImportParseOptions,
         bytes_read: Option<Arc<AtomicU64>>,
     ) -> Result<Self, String> {
+        Self::open_with_preview(file_path, options, bytes_read, false).await
+    }
+
+    async fn open_with_preview(
+        file_path: &str,
+        options: &TableImportParseOptions,
+        bytes_read: Option<Arc<AtomicU64>>,
+        preview_only: bool,
+    ) -> Result<Self, String> {
         let family = options.sql_dialect.map(sql_import_dialect_family).unwrap_or(SqlImportDialectFamily::Generic);
         let parsing_options = match options.sql_dialect {
             Some(db_type) => SqlParsingOptions::for_database_type(db_type),
@@ -2389,13 +2416,24 @@ impl SqlImportRowStream {
         };
         // 目标为 MySQL 兼容库时按 mysqldump 的 `_binary '...'` 字面量规范化解码，
         // 与 SQL 文件执行路径保持一致；其它方言保持原始文本，避免误改普通字符串。
-        let decoder = SqlFileStreamDecoder::open_for_import(
-            Path::new(file_path),
-            options.encoding.and_then(TableImportTextEncoding::encoding),
-            family == SqlImportDialectFamily::MySql,
-            bytes_read,
-        )
-        .await?;
+        let encoding = options.encoding.and_then(TableImportTextEncoding::encoding);
+        let decoder = if preview_only {
+            SqlFileStreamDecoder::open_for_import_preview(
+                Path::new(file_path),
+                encoding,
+                family == SqlImportDialectFamily::MySql,
+                bytes_read,
+            )
+            .await?
+        } else {
+            SqlFileStreamDecoder::open_for_import(
+                Path::new(file_path),
+                encoding,
+                family == SqlImportDialectFamily::MySql,
+                bytes_read,
+            )
+            .await?
+        };
         Ok(Self {
             decoder,
             splitter: Some(StreamingSqlFileSplitter::new(options.sql_dialect, parsing_options, false)),
@@ -2464,6 +2502,140 @@ impl SqlImportRowStream {
             usize::MAX,
             &mut self.total_rows,
         )
+    }
+}
+
+type ImportRowBatch = Vec<Vec<serde_json::Value>>;
+
+/// A single read-ahead slot; only the consumer owns database writes. Reserving
+/// the slot before reading also bounds the producer's in-flight parsed batches.
+struct ImportBatchPrefetch {
+    receiver: tokio::sync::mpsc::Receiver<ImportRowBatch>,
+    producer: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    pending: std::vec::IntoIter<Vec<serde_json::Value>>,
+    completion: Option<Result<(), String>>,
+}
+
+impl ImportBatchPrefetch {
+    fn start<S, F, Fut>(mut source: S, initial: ImportRowBatch, mut next: F) -> Self
+    where
+        S: Send + 'static,
+        F: FnMut(S) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = (S, Result<Option<ImportRowBatch>, String>)> + Send + 'static,
+    {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let producer = tokio::spawn(async move {
+            loop {
+                let Ok(permit) = sender.reserve().await else { return Ok(()) };
+                let (updated_source, result) = next(source).await;
+                source = updated_source;
+                match result? {
+                    Some(rows) if !rows.is_empty() => {
+                        permit.send(rows);
+                    }
+                    Some(_) => {}
+                    None => return Ok(()),
+                }
+            }
+        });
+        Self { receiver, producer: Some(producer), pending: initial.into_iter(), completion: None }
+    }
+
+    async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ImportRowBatch>, String> {
+        let max_rows = max_rows.max(1);
+        loop {
+            if self.pending.len() > 0 {
+                return Ok(Some(self.pending.by_ref().take(max_rows).collect()));
+            }
+            if let Some(result) = &self.completion {
+                result.as_ref().map_err(Clone::clone)?;
+                return Ok(None);
+            }
+            match self.receiver.recv().await {
+                Some(rows) => self.pending = rows.into_iter(),
+                None => {
+                    // A closed channel alone is not EOF: parsing errors or a
+                    // panicked task must surface after all earlier batches.
+                    let result = match self.producer.take() {
+                        Some(producer) => producer
+                            .await
+                            .map_err(|error| format!("SQL import reader task failed: {error}"))
+                            .and_then(|result| result),
+                        None => Ok(()),
+                    };
+                    self.completion = Some(result);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ImportBatchPrefetch {
+    fn drop(&mut self) {
+        self.receiver.close();
+        if let Some(producer) = self.producer.take() {
+            // Cancellation and write errors drop the reader. Abort releases the
+            // source at the next await; this task never has a database handle.
+            producer.abort();
+        }
+    }
+}
+
+struct PrefetchedSqlImportRowStream {
+    source: Option<Box<SqlImportRowStream>>,
+    initial: Option<ImportRowBatch>,
+    prefetch: Option<ImportBatchPrefetch>,
+    columns: Option<Vec<String>>,
+    total_rows: Arc<AtomicUsize>,
+    batch_size: usize,
+}
+
+impl PrefetchedSqlImportRowStream {
+    async fn open(
+        file_path: &str,
+        options: &TableImportParseOptions,
+        bytes_read: Arc<AtomicU64>,
+        batch_size: usize,
+    ) -> Result<Self, String> {
+        let batch_size = batch_size.max(1);
+        let mut source = SqlImportRowStream::open(file_path, options, Some(bytes_read)).await?;
+        let initial = source.next_batch(batch_size).await?;
+        Ok(Self {
+            columns: source.columns(),
+            total_rows: Arc::new(AtomicUsize::new(source.total_rows())),
+            source: Some(Box::new(source)),
+            initial,
+            prefetch: None,
+            batch_size,
+        })
+    }
+
+    fn columns(&self) -> Option<Vec<String>> {
+        // Mapping validation and plan compilation use the same first-batch
+        // snapshot as the serial importer, never a reader-thread mutation.
+        self.columns.clone()
+    }
+
+    fn total_rows(&self) -> usize {
+        self.total_rows.load(Ordering::Relaxed)
+    }
+
+    async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ImportRowBatch>, String> {
+        if self.prefetch.is_none() {
+            let source = self.source.take().expect("SQL row source is moved into the producer only once");
+            let total_rows = self.total_rows.clone();
+            let batch_size = self.batch_size;
+            self.prefetch =
+                Some(ImportBatchPrefetch::start(source, self.initial.take().unwrap_or_default(), move |mut source| {
+                    let total_rows = total_rows.clone();
+                    async move {
+                        let result = source.next_batch(batch_size).await;
+                        total_rows.store(source.total_rows(), Ordering::Relaxed);
+                        (source, result)
+                    }
+                }));
+        }
+        self.prefetch.as_mut().expect("SQL prefetch initialized above").next_batch(max_rows).await
     }
 }
 
@@ -2628,9 +2800,8 @@ enum ImportRowSource {
         total_rows: usize,
     },
     Sql {
-        stream: Box<SqlImportRowStream>,
+        stream: Box<PrefetchedSqlImportRowStream>,
         bytes_read: Arc<AtomicU64>,
-        pending: Option<Vec<Vec<serde_json::Value>>>,
     },
     Json {
         stream: Box<JsonImportRowStream>,
@@ -2656,9 +2827,10 @@ impl ImportRowSource {
     ) -> Result<Self, String> {
         if source_format == TableImportSourceFormat::Sql {
             let bytes_read = Arc::new(AtomicU64::new(0));
-            let mut stream = SqlImportRowStream::open(file_path, parse_options, Some(bytes_read.clone())).await?;
-            let pending = stream.next_batch(first_batch_rows).await?;
-            return Ok(Self::Sql { stream: Box::new(stream), bytes_read, pending });
+            let stream =
+                PrefetchedSqlImportRowStream::open(file_path, parse_options, bytes_read.clone(), first_batch_rows)
+                    .await?;
+            return Ok(Self::Sql { stream: Box::new(stream), bytes_read });
         }
         if source_format == TableImportSourceFormat::Json {
             let stream = JsonImportRowStream::open(file_path, parse_options, first_batch_rows).await?;
@@ -2728,12 +2900,7 @@ impl ImportRowSource {
                 let batch = rows.by_ref().take(max_rows).collect::<Vec<_>>();
                 Ok((!batch.is_empty()).then_some(batch))
             }
-            Self::Sql { stream, pending, .. } => {
-                if let Some(batch) = pending.take() {
-                    return Ok(Some(batch));
-                }
-                stream.next_batch(max_rows).await
-            }
+            Self::Sql { stream, .. } => stream.next_batch(max_rows).await,
             Self::Json { stream, .. } => stream.receiver.recv().await.transpose(),
             #[cfg(feature = "duckdb-sidecar")]
             Self::DuckDb { stream } => stream.next_batch(max_rows).await,
@@ -2749,22 +2916,62 @@ async fn parse_sql_streaming_preview(
     options: &TableImportParseOptions,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
-    let mut stream = SqlImportRowStream::open(file_path, options, None).await?;
-    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-    while let Some(batch) = stream.next_batch(preview_limit.max(1)).await? {
-        if rows.len() >= preview_limit {
-            continue;
+    scan_sql_import_source(file_path, options, preview_limit, false, |_| {}).await.map(|(parsed, _)| parsed)
+}
+
+/// The selection dialog samples rows; execution validates the complete source.
+/// A sample's row count is only a lower bound until the splitter reaches EOF.
+async fn scan_sql_import_source(
+    file_path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+    preview_only: bool,
+    mut on_progress: impl FnMut(u64),
+) -> Result<(ParsedImportFile, bool), String> {
+    let bytes_read = Arc::new(AtomicU64::new(0));
+    let mut stream =
+        SqlImportRowStream::open_with_preview(file_path, options, Some(bytes_read.clone()), preview_only).await?;
+    let mut rows = Vec::new();
+    while stream.splitter.is_some() {
+        if preview_only && stream.total_rows() >= preview_limit.max(1) {
+            break;
         }
-        let remaining = preview_limit - rows.len();
-        rows.extend(batch.into_iter().take(remaining));
+        stream.read_next_chunk().await?;
+        on_progress(bytes_read.load(Ordering::Relaxed));
+        let remaining = preview_limit.saturating_sub(rows.len());
+        // Drain the entire decoded chunk, retaining only the requested sample.
+        // Do not allocate millions of discarded 50-row preview batches.
+        rows.extend(stream.rows.drain(..).take(remaining));
     }
+    let total_rows_exact = stream.splitter.is_none();
     let columns = stream.columns().ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
-    Ok(ParsedImportFile {
-        columns,
-        rows,
-        total_rows: stream.total_rows(),
-        effective_encoding: Some(stream.effective_encoding()),
-    })
+    Ok((
+        ParsedImportFile {
+            columns,
+            rows,
+            total_rows: stream.total_rows(),
+            effective_encoding: Some(stream.effective_encoding()),
+        },
+        total_rows_exact,
+    ))
+}
+
+async fn parse_sql_sample_preview(
+    file_path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+) -> Result<(ParsedImportFile, bool), String> {
+    match scan_sql_import_source(file_path, options, preview_limit, true, |_| {}).await {
+        // Long ASCII headers can hide GBK/binary literals beyond the encoding
+        // sample. Preserve the established full-detection behavior in that case.
+        Err(error)
+            if error == "Unsupported or invalid SQL file encoding"
+                && options.encoding.and_then(TableImportTextEncoding::encoding).is_none() =>
+        {
+            scan_sql_import_source(file_path, options, preview_limit, false, |_| {}).await
+        }
+        result => result,
+    }
 }
 
 /// 解码器实际使用的 charset → 表导入对外暴露的编码枚举。
@@ -4816,6 +5023,10 @@ async fn parse_import_preview_file_with_options(
     }
 
     ensure_non_streaming_file_size(path, format)?;
+    if format == TableImportSourceFormat::Sql {
+        let (parsed, exact) = parse_sql_sample_preview(path, options, preview_limit).await?;
+        return Ok((parsed, exact, Vec::new()));
+    }
     if format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(path) {
         let path = path.to_string();
         let options = options.clone();
@@ -7875,8 +8086,8 @@ where
             Err(error) => return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error)),
         };
     let import_sql_hard_limit = mysql_import_sql_hard_limit(state, pool_key).await;
-    let prepared_source = validated_prepared_import_source(request, source_format);
-    let prepared_source_total_exact =
+    let mut prepared_source = validated_prepared_import_source(request, source_format);
+    let mut prepared_source_total_exact =
         prepared_source.is_some() && request.prepared_source.as_ref().is_some_and(|prepared| prepared.total_rows_exact);
 
     // Validate the entire text source before writing so a malformed tail cannot leave partial batches behind.
@@ -7946,6 +8157,95 @@ where
     let mut import_parse_options = request.parse_options.clone();
     if let Some((encoding, _)) = validated_text_encoding {
         import_parse_options.encoding = Some(encoding);
+    }
+
+    if source_format == TableImportSourceFormat::Sql && !prepared_source_total_exact {
+        // A quick preview is not proof that the tail is a valid single-table
+        // import. Finish validation before CREATE, TRUNCATE or any row writes.
+        let total_bytes = tokio::fs::metadata(&request.file_path).await.map(|m| m.len()).unwrap_or(0);
+        progress_callback(import_progress_with_details(
+            &request.import_id,
+            TableImportStatus::Running,
+            TableImportPhase::Preparing,
+            0,
+            0,
+            false,
+            0,
+            total_bytes,
+            started_at,
+            None,
+        ));
+        let validated = {
+            let mut last_progress = Instant::now() - IMPORT_PROGRESS_INTERVAL;
+            let validation = scan_sql_import_source(
+                &request.file_path,
+                &import_parse_options,
+                CREATE_TABLE_INFERENCE_ROWS,
+                false,
+                |bytes_read| {
+                    if last_progress.elapsed() >= IMPORT_PROGRESS_INTERVAL || bytes_read >= total_bytes {
+                        progress_callback(import_progress_with_details(
+                            &request.import_id,
+                            TableImportStatus::Running,
+                            TableImportPhase::Preparing,
+                            0,
+                            0,
+                            false,
+                            bytes_read.min(total_bytes),
+                            total_bytes,
+                            started_at,
+                            None,
+                        ));
+                        last_progress = Instant::now();
+                    }
+                },
+            );
+            tokio::pin!(validation);
+            loop {
+                if is_cancelled(&request.import_id).await {
+                    break Ok(None);
+                }
+                tokio::select! {
+                    result = &mut validation => break result.map(|(parsed, _)| Some(parsed)),
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                }
+            }
+        };
+        match validated {
+            Ok(Some(parsed)) => {
+                prepared_source = Some(parsed);
+                prepared_source_total_exact = true;
+            }
+            Ok(None) => {
+                progress_callback(import_cancelled_progress(&request.import_id, 0, 0, false, started_at));
+                return Err("Import cancelled".to_string());
+            }
+            Err(error) => {
+                return Err(emit_import_error_with_total_rows_exact(
+                    &mut progress_callback,
+                    request,
+                    0,
+                    0,
+                    false,
+                    started_at,
+                    error,
+                ));
+            }
+        }
+    }
+    if source_format == TableImportSourceFormat::Sql && prepared_source_total_exact {
+        // MySQL always enables binary-literal normalization. Other Auto dialects
+        // must retain detection: an encoding alone does not preserve the decoder's
+        // separately detected MySQL binary-literal normalization flag.
+        if import_parse_options.sql_dialect.map(sql_import_dialect_family) == Some(SqlImportDialectFamily::MySql) {
+            if let Some(encoding) = prepared_source.as_ref().and_then(|p| p.effective_encoding) {
+                import_parse_options.encoding = Some(encoding);
+            }
+        }
+        if is_cancelled(&request.import_id).await {
+            progress_callback(import_cancelled_progress(&request.import_id, 0, 0, false, started_at));
+            return Err("Import cancelled".to_string());
+        }
     }
 
     let mut create_table_sample: Option<ParsedImportFile> = None;
@@ -9008,8 +9308,11 @@ where
         }
     };
 
-    let total_rows = row_source.total_rows();
-    let total_rows_exact = row_source.total_rows_known();
+    let validated_sql_total = (source_format == TableImportSourceFormat::Sql && prepared_source_total_exact)
+        .then(|| prepared_source.as_ref().map(|source| source.total_rows))
+        .flatten();
+    let total_rows = validated_sql_total.unwrap_or_else(|| row_source.total_rows());
+    let total_rows_exact = validated_sql_total.is_some() || row_source.total_rows_known();
     // 流式来源在读完之前不知道总行数，进度与计数都不能按已知总数裁剪。
     let total_rows_cap = if total_rows_exact { total_rows } else { usize::MAX };
     let source_columns = match row_source.columns() {
@@ -11419,6 +11722,74 @@ mod tests {
     }
 
     #[test]
+    fn sql_import_literal_conversion_does_not_format_success_context() {
+        struct UnusedContext;
+        impl std::fmt::Display for UnusedContext {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("successful literal conversion formatted an error context")
+            }
+        }
+
+        let literals = [
+            (SqlValue::Null, serde_json::Value::Null),
+            (SqlValue::Boolean(true), serde_json::json!(true)),
+            (SqlValue::Number("42".to_string(), false), serde_json::json!(42)),
+            (SqlValue::Number("1.5".to_string(), false), serde_json::json!(1.5)),
+            (SqlValue::SingleQuotedString("中文 ' \\ ;".to_string()), serde_json::json!("中文 ' \\ ;")),
+        ];
+        for (literal, expected) in literals {
+            assert_eq!(sql_import_expr_value(Expr::Value(literal.into()), &UnusedContext).unwrap(), expected);
+        }
+        for (op, expected) in [(UnaryOperator::Plus, 3), (UnaryOperator::Minus, -3)] {
+            let expr =
+                Expr::UnaryOp { op, expr: Box::new(Expr::Value(SqlValue::Number("3".to_string(), false).into())) };
+            assert_eq!(sql_import_expr_value(expr, &UnusedContext).unwrap(), serde_json::json!(expected));
+        }
+    }
+
+    #[test]
+    fn sql_import_moves_owned_string_literals_without_copying() {
+        let text = "large payload 中文\n".repeat(16_384);
+        let original_pointer = text.as_ptr();
+        let original_len = text.len();
+        let expr = Expr::Value(SqlValue::SingleQuotedString(text).into());
+        let context = SqlImportValueContext { table: "items", column: "payload" };
+
+        let converted = sql_import_expr_value(expr, &context).unwrap();
+        let serde_json::Value::String(converted) = converted else {
+            panic!("string literal must remain a string");
+        };
+        assert_eq!(converted.as_ptr(), original_pointer, "move the AST string instead of cloning it");
+        assert_eq!(converted.len(), original_len);
+    }
+
+    #[test]
+    fn sql_import_literal_errors_keep_table_and_column_context() {
+        let context = SqlImportValueContext { table: "测试表", column: "内容" };
+        for (literal, expected_suffix) in [
+            (SqlValue::Number("1e9999".to_string(), false), "unsupported numeric literal '1e9999'"),
+            (SqlValue::Placeholder("?".to_string()), "bind placeholders are not supported for SQL import"),
+            (
+                SqlValue::HexStringLiteral("CAFE".to_string()),
+                "binary/hex literals (X'..', B'..') are not supported for SQL import",
+            ),
+        ] {
+            let error = sql_import_expr_value(Expr::Value(literal.into()), &context).unwrap_err();
+            assert_eq!(error, format!("SQL import: table '测试表', column 内容: {expected_suffix}"));
+        }
+    }
+
+    #[test]
+    fn sql_import_still_validates_cells_beyond_preview_limit() {
+        let script = b"INSERT INTO products (id, payload) VALUES (1, 'ok'), (2, UUID());";
+        let expected = "SQL import: table 'products', column payload: expressions (functions, operators, casts, ...) \
+                        are not supported; SQL import only accepts literal values so statement semantics are preserved";
+        for preview_limit in [0, 1, 10] {
+            assert_eq!(parse_sql_bytes(script, preview_limit).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
     fn sql_import_preserves_current_timestamp_functions() {
         let options = sql_import_options(DatabaseType::Mysql);
         let script = b"INSERT INTO sai_user (id, created_at, updated_at) VALUES (1, NOW(), SYSDATE());";
@@ -11632,6 +12003,228 @@ mod tests {
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!("a;b")]);
         assert_eq!(parsed.rows[1], vec![serde_json::json!("it -- not a comment")]);
+    }
+
+    #[tokio::test]
+    async fn import_batch_prefetch_preserves_order_and_consumer_limit() {
+        let source =
+            vec![vec![vec![serde_json::json!(3)], vec![serde_json::json!(4)], vec![serde_json::json!(5)]]].into_iter();
+        let mut reader = ImportBatchPrefetch::start(
+            source,
+            vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+            |mut source| async move {
+                let next = source.next();
+                (source, Ok(next))
+            },
+        );
+        let mut rows = Vec::new();
+        for limit in [1, 2, 1, 2, 1, 2] {
+            if let Some(batch) = reader.next_batch(limit).await.unwrap() {
+                assert!(batch.len() <= limit);
+                rows.extend(batch);
+            }
+        }
+        assert_eq!(rows, (1..=5).map(|id| vec![serde_json::json!(id)]).collect::<Vec<_>>());
+        assert!(reader.next_batch(2).await.unwrap().is_none());
+        assert!(reader.producer.is_none(), "EOF must join the producer");
+    }
+
+    #[tokio::test]
+    async fn import_batch_prefetch_delivers_valid_prefix_before_error() {
+        let mut reader = ImportBatchPrefetch::start(0usize, vec![vec![serde_json::json!(1)]], |index| async move {
+            let next = if index == 0 {
+                Ok(Some(vec![vec![serde_json::json!(2)]]))
+            } else {
+                Err("invalid source expression".to_string())
+            };
+            (index + 1, next)
+        });
+        assert_eq!(reader.next_batch(500).await.unwrap(), Some(vec![vec![serde_json::json!(1)]]));
+        assert_eq!(reader.next_batch(500).await.unwrap(), Some(vec![vec![serde_json::json!(2)]]));
+        assert_eq!(reader.next_batch(500).await.unwrap_err(), "invalid source expression");
+        assert_eq!(reader.next_batch(500).await.unwrap_err(), "invalid source expression");
+    }
+
+    #[tokio::test]
+    async fn import_batch_prefetch_reports_producer_panic_instead_of_eof() {
+        let mut reader = ImportBatchPrefetch::start(0usize, Vec::new(), |index| async move {
+            assert_eq!(index, 0, "reader panic fixture");
+            (index + 1, Ok(Some(vec![vec![serde_json::json!(7)]])))
+        });
+        assert_eq!(reader.next_batch(500).await.unwrap(), Some(vec![vec![serde_json::json!(7)]]));
+        let error = reader.next_batch(500).await.unwrap_err();
+        assert!(error.starts_with("SQL import reader task failed:"), "{error}");
+        assert!(error.contains("reader panic fixture"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn import_batch_prefetch_reserves_before_reading_and_aborts_on_drop() {
+        struct Dropped(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_read = Arc::new(tokio::sync::Notify::new());
+        let (dropped, wait_dropped) = tokio::sync::oneshot::channel();
+        let producer_calls = calls.clone();
+        let producer_first_read = first_read.clone();
+        let reader = ImportBatchPrefetch::start(Dropped(Some(dropped)), Vec::new(), move |guard| {
+            let calls = producer_calls.clone();
+            let first_read = producer_first_read.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                first_read.notify_one();
+                (guard, Ok(Some(vec![vec![serde_json::json!(1)]])))
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), first_read.notified()).await.unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a full slot must prevent parsing a second batch");
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(2), wait_dropped).await.unwrap().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn import_batch_prefetch_keeps_initial_rows_before_immediate_failure() {
+        for should_panic in [false, true] {
+            let mut reader = ImportBatchPrefetch::start((), vec![vec![serde_json::json!(1)]], move |_| async move {
+                assert!(!should_panic, "immediate reader panic fixture");
+                ((), Err("immediate parse failure".to_string()))
+            });
+            assert_eq!(reader.next_batch(1).await.unwrap(), Some(vec![vec![serde_json::json!(1)]]));
+            let error = reader.next_batch(1).await.unwrap_err();
+            if should_panic {
+                assert!(error.contains("immediate reader panic fixture"), "{error}");
+            } else {
+                assert_eq!(error, "immediate parse failure");
+            }
+            assert_eq!(reader.next_batch(1).await.unwrap_err(), error);
+        }
+    }
+
+    #[tokio::test]
+    async fn import_batch_prefetch_drop_aborts_an_inflight_read() {
+        struct Dropped(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let (dropped, wait_dropped) = tokio::sync::oneshot::channel();
+        let (entered, wait_entered) = tokio::sync::oneshot::channel();
+        let reader = ImportBatchPrefetch::start(
+            (Dropped(Some(dropped)), Some(entered)),
+            Vec::new(),
+            |(guard, mut entered)| async move {
+                let _ = entered.take().unwrap().send(());
+                std::future::pending::<()>().await;
+                ((guard, entered), Ok(None))
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), wait_entered).await.unwrap().unwrap();
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(2), wait_dropped).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefetched_sql_rows_match_serial_stream_and_start_lazily() {
+        let mut script = String::new();
+        for index in 0..3000 {
+            script.push_str(&format!("INSERT INTO t(id, payload) VALUES ({index}, '{}');\n", "x".repeat(100)));
+        }
+        let path = std::env::temp_dir().join(format!("dbx-table-import-prefetch-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &script).unwrap();
+        let file_path = path.to_string_lossy().to_string();
+        let options = sql_import_options(DatabaseType::Mysql);
+        let mut serial = SqlImportRowStream::open(&file_path, &options, None).await.unwrap();
+        let mut expected = Vec::new();
+        while let Some(batch) = serial.next_batch(37).await.unwrap() {
+            expected.extend(batch);
+        }
+
+        let mut reader =
+            PrefetchedSqlImportRowStream::open(&file_path, &options, Arc::new(AtomicU64::new(0)), 37).await.unwrap();
+        assert!(reader.prefetch.is_none(), "mapping validation must happen before background reads start");
+        assert_eq!(reader.columns(), serial.columns());
+        let mut actual = Vec::new();
+        let mut index = 0;
+        loop {
+            let limit = [1, 7, 50][index % 3];
+            let Some(batch) = reader.next_batch(limit).await.unwrap() else { break };
+            assert!(batch.len() <= limit);
+            actual.extend(batch);
+            index += 1;
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(reader.total_rows(), serial.total_rows());
+        drop(reader);
+        drop(serial);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Manual CPU/I/O benchmark for the actual table-import SQL row stream.
+    /// Unlike SQL-file execution benchmarks, this also parses each INSERT into
+    /// its AST and converts its literals. It does not write to a database or
+    /// measure the wizard's complete end-to-end import time.
+    #[tokio::test]
+    #[ignore = "set DBX_SQL_IMPORT_BENCH_FILE to a SQL fixture; no database access"]
+    async fn benchmark_sql_table_import_streaming() {
+        let file_path = std::env::var("DBX_SQL_IMPORT_BENCH_FILE").expect("DBX_SQL_IMPORT_BENCH_FILE is required");
+        let input_sha256 = format!("{:x}", Sha256::digest(std::fs::read(&file_path).unwrap()));
+        let options = sql_import_options(DatabaseType::Mysql);
+        let wall_started_at = Instant::now();
+        let phase_started_at = Instant::now();
+        let mut stream = SqlImportRowStream::open(&file_path, &options, None).await.unwrap();
+        let mut parse_elapsed = phase_started_at.elapsed();
+        let mut output_hash = Sha256::new();
+        let mut rows = 0usize;
+        let mut batches = 0usize;
+        let mut columns = None;
+        loop {
+            let phase_started_at = Instant::now();
+            let batch = stream.next_batch(500).await.unwrap();
+            parse_elapsed += phase_started_at.elapsed();
+            let Some(batch) = batch else { break };
+            assert!(batch.len() <= 500);
+            if columns.is_none() {
+                columns = stream.columns();
+                output_hash.update(serde_json::to_vec(&columns).unwrap());
+                output_hash.update(b"\n");
+            }
+            // Verification is excluded from parse_elapsed, and rows are hashed
+            // individually so the fingerprint does not depend on batch boundaries.
+            for row in &batch {
+                output_hash.update(serde_json::to_vec(row).unwrap());
+                output_hash.update(b"\n");
+            }
+            rows += batch.len();
+            batches += 1;
+        }
+        assert_eq!(rows, stream.total_rows());
+        assert!(rows > 0, "benchmark fixture must contain INSERT rows");
+        println!(
+            "SQL_TABLE_IMPORT_STREAM_BENCH {}",
+            serde_json::json!({
+                "input_sha256": input_sha256,
+                "rows": rows,
+                "batches": batches,
+                "columns": columns,
+                "parse_ms": parse_elapsed.as_secs_f64() * 1000.0,
+                "wall_ms_including_verification": wall_started_at.elapsed().as_secs_f64() * 1000.0,
+                "output_sha256": format!("{:x}", output_hash.finalize()),
+                "database_execution": "NOT_RUN",
+            })
+        );
     }
 
     /// 流式行流必须与整份解析产出完全一致的列、行与总行数，
@@ -16287,5 +16880,99 @@ mod tests {
         assert!(batches[0].sql.contains("(2, 'b')"), "batch 0: {}", batches[0].sql);
         assert!(batches[1].sql.contains("(3, 'c')"), "batch 1: {}", batches[1].sql);
         assert!(batches[1].sql.contains("(4, 'd')"), "batch 1: {}", batches[1].sql);
+    }
+}
+
+#[cfg(test)]
+mod sql_sample_preview_tests {
+    use super::*;
+
+    fn fixture(script: &[u8]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.sql");
+        std::fs::write(&path, script).unwrap();
+        (dir, path.to_string_lossy().into_owned())
+    }
+
+    fn large_valid_prefix() -> String {
+        (0..20_000).map(|id| format!("INSERT INTO t (id) VALUES ({id});\n")).collect()
+    }
+
+    #[tokio::test]
+    async fn sql_sample_stops_before_tail_and_full_validation_rejects_other_table() {
+        let mut sql = large_valid_prefix();
+        sql.push_str("INSERT INTO another_table (id) VALUES (999);");
+        let (_dir, path) = fixture(sql.as_bytes());
+        let options = TableImportParseOptions::default();
+        let (sample, exact, _) =
+            parse_import_preview_file_with_options(&path, TableImportSourceFormat::Sql, &options, 50).await.unwrap();
+        assert_eq!(sample.rows.len(), 50);
+        assert!(!exact);
+        assert!(sample.total_rows < 20_000);
+        assert_eq!(sample.rows[0], vec![serde_json::json!(0)]);
+        assert!(parse_sql_streaming_preview(&path, &options, 50).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sql_sample_full_validation_still_checks_invalid_tail_values() {
+        let mut sql = large_valid_prefix();
+        sql.push_str("INSERT INTO t (id) VALUES ((SELECT 1));");
+        let (_dir, path) = fixture(sql.as_bytes());
+        let options = TableImportParseOptions::default();
+        assert!(parse_sql_sample_preview(&path, &options, 50).await.is_ok());
+        assert!(parse_sql_streaming_preview(&path, &options, 50).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sql_sample_small_files_are_exact_after_eof() {
+        let (_dir, path) = fixture(b"INSERT INTO t (id) VALUES (1), (2);");
+        let (sample, exact) = parse_sql_sample_preview(&path, &TableImportParseOptions::default(), 50).await.unwrap();
+        assert!(exact);
+        assert_eq!(sample.total_rows, 2);
+        assert_eq!(sample.rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sql_sample_zero_limit_returns_columns_without_rows() {
+        let (_dir, path) = fixture(b"INSERT INTO t (id) VALUES (1), (2);");
+        let (sample, _) = parse_sql_sample_preview(&path, &TableImportParseOptions::default(), 0).await.unwrap();
+        assert!(sample.rows.is_empty());
+        assert_eq!(sample.columns, ["id"]);
+    }
+
+    #[tokio::test]
+    async fn sql_sample_reports_missing_inserts() {
+        let (_dir, path) = fixture(b"CREATE TABLE t (id INT); SET NAMES utf8;");
+        let error = parse_sql_sample_preview(&path, &TableImportParseOptions::default(), 50).await.unwrap_err();
+        assert!(error.contains("No INSERT statements"));
+    }
+
+    #[tokio::test]
+    async fn sql_sample_recovers_gbk_after_long_ascii_header() {
+        let mut sql = format!("-- {}\nINSERT INTO t (name) VALUES ('", "a".repeat(1024 * 1024 + 512)).into_bytes();
+        sql.extend_from_slice(&[0xd6, 0xd0, 0xce, 0xc4]);
+        sql.extend_from_slice(b"');");
+        let (_dir, path) = fixture(&sql);
+        let (sample, exact) = parse_sql_sample_preview(&path, &TableImportParseOptions::default(), 50).await.unwrap();
+        assert!(exact);
+        assert_eq!(sample.effective_encoding, Some(TableImportTextEncoding::Gbk));
+        assert_eq!(sample.rows, vec![vec![serde_json::json!("中文")]]);
+    }
+
+    #[tokio::test]
+    async fn sql_full_scan_counts_rows_reports_bytes_and_retains_only_sample() {
+        let sql = large_valid_prefix();
+        let (_dir, path) = fixture(sql.as_bytes());
+        let mut progress = Vec::new();
+        let (parsed, exact) = scan_sql_import_source(&path, &TableImportParseOptions::default(), 100, false, |bytes| {
+            progress.push(bytes)
+        })
+        .await
+        .unwrap();
+        assert!(exact);
+        assert_eq!(parsed.total_rows, 20_000);
+        assert_eq!(parsed.rows.len(), 100);
+        assert!(progress.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(progress.last(), Some(&(sql.len() as u64)));
     }
 }

@@ -97,6 +97,13 @@ describe("tableImport", () => {
     expect(tableImportProgressPercent({ status: "running", phase: "finalizing", rowsImported: 1000, totalRows: 1000, totalRowsExact: true, bytesRead: 100, totalBytes: 100 })).toBe(99);
   });
 
+  it("reserves the first ten percent for SQL validation before writing", () => {
+    expect(tableImportProgressPercent({ status: "running", phase: "preparing", rowsImported: 0, totalRows: 0, totalRowsExact: false, bytesRead: 50, totalBytes: 100 })).toBe(5);
+    expect(tableImportProgressPercent({ status: "running", phase: "preparing", rowsImported: 0, totalRows: 0, totalRowsExact: false, bytesRead: 100, totalBytes: 100 })).toBe(10);
+    expect(tableImportProgressPercent({ status: "running", phase: "writing", rowsImported: 0, totalRows: 100, totalRowsExact: true, bytesRead: 0, totalBytes: 100 })).toBe(10);
+    expect(tableImportProgressPercent({ status: "running", phase: "writing", rowsImported: 50, totalRows: 100, totalRowsExact: true })).toBe(55);
+  });
+
   it("auto maps exact and normalized column names", () => {
     expect(autoMapImportColumns(["id", "user name", "ignored"], ["id", "user_name"])).toEqual({
       id: "id",

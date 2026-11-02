@@ -1603,6 +1603,26 @@ impl SqlFileStreamDecoder {
             .await
     }
 
+    /// Sampled detection is only for interactive previews. Imports still use
+    /// `open_for_import` to detect the encoding over the complete source.
+    pub(crate) async fn open_for_import_preview(
+        file_path: &Path,
+        encoding: Option<&'static encoding_rs::Encoding>,
+        normalize_mysql_binary_literals: bool,
+        bytes_read: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, String> {
+        if encoding.is_some() {
+            return Self::open_for_import(file_path, encoding, normalize_mysql_binary_literals, bytes_read).await;
+        }
+        Self::open_with_options(
+            file_path,
+            Some(SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES),
+            normalize_mysql_binary_literals,
+            bytes_read,
+        )
+        .await
+    }
+
     /// 解码器实际使用的文本编码（显式指定或自动探测的结果）。
     pub(crate) fn encoding(&self) -> &'static encoding_rs::Encoding {
         self.encoding

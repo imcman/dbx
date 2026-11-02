@@ -845,6 +845,23 @@ impl SqlStatementSplitter {
                 continue;
             }
 
+            // Comments, dollar strings and Oracle q-quotes were handled above.
+            // Inside an ordinary quoted value/identifier, non-quote, non-escape
+            // characters cannot change scanner state or end a statement. Append
+            // that span without repeating the full state machine for every char.
+            // Stop at all quote kinds conservatively; the original logic below
+            // remains responsible for quote toggles and backslash parity.
+            if (self.in_single_quote || self.in_double_quote || self.in_backtick)
+                && !matches!(ch, '\'' | '"' | '`' | '\\')
+            {
+                let length =
+                    chars[i..].iter().position(|ch| matches!(ch, '\'' | '"' | '`' | '\\')).unwrap_or(chars.len() - i);
+                self.buffer.extend(chars[i..i + length].iter().copied());
+                self.previous = Some(chars[i + length - 1]);
+                i += length;
+                continue;
+            }
+
             if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
                 if self.options.profile.supports_oracle_q_quotes
                     && ch == '\''
@@ -2682,14 +2699,39 @@ fn preprocess_psql_control_commands(sql: &str, profile: SqlDialectProfile) -> (S
 }
 
 pub fn statement_summary(statement: &str) -> String {
+    statement_summary_chars(statement.chars())
+}
+
+fn statement_summary_chars(chars: impl Iterator<Item = char>) -> String {
     const MAX_LEN: usize = 120;
 
-    let collapsed = statement.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_LEN {
-        return collapsed;
+    // Extended INSERTs can be megabytes long, while progress only needs their
+    // first 120 characters. Do not collect/normalize the unused tail (or scan
+    // to the end of a large token with split_whitespace).
+    let mut summary = String::with_capacity(MAX_LEN);
+    let mut len = 0;
+    let mut pending_space = false;
+    for ch in chars {
+        if ch.is_whitespace() {
+            pending_space = len > 0;
+            continue;
+        }
+        if pending_space {
+            summary.push(' ');
+            len += 1;
+            if len == MAX_LEN {
+                break;
+            }
+        }
+        summary.push(ch);
+        len += 1;
+        if len == MAX_LEN {
+            break;
+        }
+        pending_space = false;
     }
 
-    collapsed.chars().take(MAX_LEN).collect()
+    summary
 }
 
 pub fn prepare_sql_file_statement(
@@ -3453,18 +3495,30 @@ fn find_block_comment_close(bytes: &[u8], mut start: usize, nested: bool) -> Opt
 }
 
 fn is_mysql_key_toggle_statement(statement: &str) -> bool {
+    if !starts_with_keyword(statement.trim_start(), "ALTER") {
+        return false;
+    }
     let upper = statement.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
     upper.starts_with("ALTER TABLE ") && (upper.ends_with(" ENABLE KEYS") || upper.ends_with(" DISABLE KEYS"))
 }
 
 fn is_mysql_lock_table_statement(statement: &str) -> bool {
     let executable = leading_executable_sql(statement);
+    // Most dump statements are large INSERTs. Reject them before allocating
+    // and uppercasing their entire payload just to recognize a control command.
+    let head = executable.trim_start();
+    if !starts_with_keyword(head, "LOCK") && !starts_with_keyword(head, "UNLOCK") {
+        return false;
+    }
     let upper = executable.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
     upper == "UNLOCK TABLES" || (upper.starts_with("LOCK TABLES ") && upper.ends_with(" WRITE"))
 }
 
 fn is_mysql_session_restore_statement(statement: &str) -> bool {
     let executable = leading_executable_sql_with_options(statement, SqlParsingOptions::mysql_compatible());
+    if !starts_with_keyword(executable.trim_start(), "SET") {
+        return false;
+    }
     let upper = executable.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
     if !upper.starts_with("SET ") {
         return false;
@@ -4623,6 +4677,13 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
 }
 
 fn has_executable_sql_with_options(statement: &str, options: SqlParsingOptions) -> bool {
+    // Once an ordinary SQL token starts, the comment scanner would immediately
+    // return true. Avoid allocating a Vec<char> for the whole INSERT payload.
+    match statement.trim_start().chars().next() {
+        None => return false,
+        Some('-' | '/' | '#') => {}
+        Some(_) => return true,
+    }
     let chars = statement.chars().collect::<Vec<_>>();
     let mut in_line_comment = false;
     let mut block_comment_depth = 0usize;
@@ -4717,6 +4778,60 @@ mod tests {
         starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
         SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
     };
+
+    fn assert_streaming_quoted_statements(sql: &str, database: DatabaseType, expected: &[String]) {
+        let chars: Vec<char> = sql.chars().collect();
+        for chunk_size in [1, 2, 3, 7, 31, 128, 8192] {
+            let mut splitter = SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(database));
+            let mut statements = Vec::new();
+            for chunk in chars.chunks(chunk_size) {
+                statements.extend(splitter.push_chunk(&chunk.iter().collect::<String>()));
+                assert!(splitter.push_chunk("").is_empty());
+            }
+            statements.extend(splitter.finish());
+            assert_eq!(statements, expected, "database {database:?}, chunk_size {chunk_size}");
+        }
+    }
+
+    #[test]
+    fn streaming_ordinary_quoted_spans_preserve_unicode_newlines_and_delimiter_text() {
+        let payload =
+            "ordinary text 中文🙂; -- still quoted\n/* still quoted */\nGO\n/\nDELIMITER $$\nEND $$\n".repeat(16);
+        for database in [
+            DatabaseType::Mysql,
+            DatabaseType::Postgres,
+            DatabaseType::Sqlite,
+            DatabaseType::SqlServer,
+            DatabaseType::Oracle,
+            DatabaseType::Gaussdb,
+        ] {
+            for quote in ['\'', '"', '`'] {
+                let first = format!("SELECT {quote}{payload}{quote}");
+                let sql = format!("{first}; SELECT 2;");
+                assert_streaming_quoted_statements(&sql, database, &[first, "SELECT 2".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_ordinary_quoted_spans_preserve_escape_parity_and_quote_boundaries() {
+        let cases = [
+            (DatabaseType::Mysql, r#"SELECT 'long ordinary value \' still quoted; end'"#),
+            (DatabaseType::Mysql, r#"SELECT 'long ordinary value \\\' still quoted; end'"#),
+            (DatabaseType::Mysql, r#"SELECT 'long ordinary value \\'"#),
+            (DatabaseType::Mysql, r#"SELECT "long ordinary value \" still quoted; end""#),
+            (DatabaseType::Postgres, r#"SELECT E'long ordinary value \' still quoted; end'"#),
+            (DatabaseType::Postgres, r#"SELECT 'long ordinary value \'"#),
+            (DatabaseType::Sqlite, r#"SELECT 'long ordinary value '' still quoted; end'"#),
+            (DatabaseType::SqlServer, r#"SELECT "long ordinary value "" still quoted; end""#),
+            (DatabaseType::Mysql, "SELECT `long ordinary value `` still quoted; end`"),
+            (DatabaseType::Oracle, r#"SELECT 'double " and backtick ` remain quoted; end'"#),
+        ];
+        for (database, first) in cases {
+            let sql = format!("{first}; SELECT 2;");
+            assert_streaming_quoted_statements(&sql, database, &[first.to_string(), "SELECT 2".to_string()]);
+        }
+    }
 
     #[test]
     fn file_directive_boundaries_use_the_dialect_line_comment_rule() {
@@ -5592,6 +5707,183 @@ mod tests {
             prepare_sql_file_statement("/*!40101 SET NAMES utf8 */", &DatabaseType::Mysql, None),
             SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
         );
+    }
+
+    #[test]
+    fn import_preprocessing_summary_matches_full_normalization() {
+        let reference =
+            |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>();
+        for source in [
+            "",
+            " \t\r\n\u{0085}\u{00a0}\u{2003}\u{2028}\u{3000} ",
+            "\n SELECT\t'hello  world', '你好 🦀';\r\n",
+            "INSERT INTO t VALUES ('a\0b\u{200b}c');",
+        ] {
+            assert_eq!(super::statement_summary(source), reference(source));
+        }
+        for len in [0, 1, 118, 119, 120, 121, 500] {
+            for ch in ['x', '界', '🦀'] {
+                let prefix = ch.to_string().repeat(len);
+                for whitespace in [" ", "\t\r\n", "\u{0085}", "\u{00a0}\u{2003}\u{2028}\u{3000}"] {
+                    for suffix in ["", "tail", "🦀 中文", "\t\n"] {
+                        let source = format!("{whitespace}{prefix}{whitespace}{suffix}{whitespace}");
+                        assert_eq!(super::statement_summary(&source), reference(&source), "{source:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn import_preprocessing_summary_stops_before_unused_token_tail() {
+        // A timing-independent work bound: even a single unbroken SQL token
+        // must stop after 120 output characters, not scan to its whitespace.
+        let chars =
+            std::iter::repeat_n('界', 120).chain(std::iter::from_fn(|| panic!("summary inspected its unused tail")));
+        assert_eq!(super::statement_summary_chars(chars), "界".repeat(120));
+    }
+
+    #[test]
+    fn import_preprocessing_summary_preserves_truncation_at_collapsed_space() {
+        let prefix = "x".repeat(119);
+        let source = format!("{prefix}\n\t界");
+        let chars = source.chars().chain(std::iter::from_fn(|| panic!("summary inspected its unused tail")));
+        assert_eq!(super::statement_summary_chars(chars), format!("{prefix} "));
+        assert_eq!(super::statement_summary(&format!("{prefix}\n\t")), prefix);
+    }
+
+    #[test]
+    fn import_preprocessing_control_guards_match_legacy_classification() {
+        let legacy_key_toggle = |sql: &str| {
+            let upper = sql.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+            upper.starts_with("ALTER TABLE ") && (upper.ends_with(" ENABLE KEYS") || upper.ends_with(" DISABLE KEYS"))
+        };
+        let legacy_lock = |sql: &str| {
+            let executable = super::leading_executable_sql(sql);
+            let upper = executable.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+            upper == "UNLOCK TABLES" || (upper.starts_with("LOCK TABLES ") && upper.ends_with(" WRITE"))
+        };
+        let legacy_restore = |sql: &str| {
+            let executable = super::leading_executable_sql_with_options(sql, SqlParsingOptions::mysql_compatible());
+            let upper = executable.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+            if !upper.starts_with("SET ") {
+                return false;
+            }
+            let assignment = upper.trim_start_matches("SET ").trim();
+            !assignment.starts_with('@')
+                && (assignment.contains("= @OLD_")
+                    || assignment.contains("=@OLD_")
+                    || assignment.contains("= @SAVED_")
+                    || assignment.contains("=@SAVED_"))
+        };
+        for prefix in ["", " \t", "\u{2003}", "-- header\n", "/* header */ ", "# header\n"] {
+            for statement in [
+                "",
+                "ALTER",
+                "alter\tTABLE `t`\nENABLE\u{3000}KEYS",
+                "ALTER TABLE `t` DISABLE KEYS",
+                "ALTER_TABLE t ENABLE KEYS",
+                "ALTER$TABLE t ENABLE KEYS",
+                "ALTER TABLE t ENABLE KEYS;",
+                "LOCK TABLES `t` WRITE",
+                "lock\u{00a0}TABLES `t`\nWRITE",
+                "LOCK TABLES `t` READ",
+                "LOCKTABLES `t` WRITE",
+                "LOCK_TABLES `t` WRITE",
+                "UNLOCK TABLES",
+                "UNLOCK\u{2003}TABLES",
+                "UNLOCK TABLES;",
+                "UNLOCK TABLES extra",
+                "SET TIME_ZONE=@OLD_TIME_ZONE",
+                "set\u{0085}SQL_MODE = @saved_sql_mode",
+                "SET SET TIME_ZONE=@OLD_TIME_ZONE",
+                "SET @OLD_SQL_MODE=@@SQL_MODE",
+                "SET NAMES utf8mb4",
+                "SET_SQL_MODE=@OLD_SQL_MODE",
+                "SET$SQL_MODE=@OLD_SQL_MODE",
+                "SET中=@OLD_SQL_MODE",
+                "SELECT 'SET SQL_MODE=@OLD_SQL_MODE'",
+                "INSERT INTO t VALUES ('LOCK TABLES t WRITE', 'SET X=@OLD_X')",
+            ] {
+                let sql = format!("{prefix}{statement}");
+                assert_eq!(super::is_mysql_key_toggle_statement(&sql), legacy_key_toggle(&sql), "{sql:?}");
+                assert_eq!(super::is_mysql_lock_table_statement(&sql), legacy_lock(&sql), "{sql:?}");
+                assert_eq!(super::is_mysql_session_restore_statement(&sql), legacy_restore(&sql), "{sql:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn import_preprocessing_preserves_large_mysql_insert_payload() {
+        let source = format!(
+            "INSERT INTO t (payload) VALUES ('{}')",
+            "x\u{2003}SET SQL_MODE=@OLD_SQL_MODE; LOCK TABLES t WRITE 🦀".repeat(32_768)
+        );
+        assert!(source.len() > 1024 * 1024);
+        assert!(!super::is_mysql_key_toggle_statement(&source));
+        assert!(!super::is_mysql_lock_table_statement(&source));
+        assert!(!super::is_mysql_session_restore_statement(&source));
+        assert_eq!(
+            prepare_sql_file_statement(&source, &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute(source.clone())
+        );
+        let expected = source.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>();
+        assert_eq!(super::statement_summary(&source), expected);
+    }
+
+    #[test]
+    fn import_preprocessing_executable_fast_path_matches_comment_scanner() {
+        let large_insert = format!("INSERT INTO t VALUES ('{}')", "中🦀value".repeat(131_072));
+        let cases = [
+            "",
+            " \t\r\n\u{0085}\u{00a0}\u{2003}\u{2028}\u{3000}",
+            "SELECT 1",
+            "INSERT INTO t VALUES (1, 'text')",
+            large_insert.as_str(),
+            "-- comment only",
+            "--comment without a space",
+            "-- comment\nSELECT 1",
+            "# comment only",
+            "# comment\nSELECT 1",
+            "/* comment */",
+            "/* comment */ SELECT 1",
+            "/* unterminated",
+            "/* outer /* inner */ text */",
+            "/* outer /* inner */ text */ SELECT 1",
+            "/*!40101 SET NAMES utf8mb4 */",
+            "/*M!100100 SET @x = 1 */",
+            "/*! */",
+            "/*M! */",
+            "/",
+            "-",
+            "#",
+            "'literal'",
+        ];
+        for options in [
+            SqlParsingOptions::default(),
+            SqlParsingOptions::for_database_type(DatabaseType::Mysql),
+            SqlParsingOptions::for_database_type(DatabaseType::Postgres),
+            SqlParsingOptions::for_database_type(DatabaseType::Sqlite),
+            SqlParsingOptions::for_database_type(DatabaseType::SqlServer),
+            SqlParsingOptions::for_database_type(DatabaseType::Oracle),
+        ] {
+            for prefix in ["", " \t\u{2003}"] {
+                for source in cases {
+                    let source = format!("{prefix}{source}");
+                    // A neutral empty comment forces the unchanged scanner
+                    // path, providing an equivalent reference for every dialect.
+                    let scanner_source = format!("/**/{source}");
+                    assert_eq!(
+                        super::has_executable_sql_with_options(&source, options),
+                        super::has_executable_sql_with_options(&scanner_source, options),
+                        "SQL prefix: {:?}",
+                        source.chars().take(100).collect::<String>()
+                    );
+                }
+            }
+        }
+        assert!(!super::has_executable_sql(" \t\u{2003}"));
+        assert!(super::has_executable_sql(&large_insert));
     }
 
     #[test]

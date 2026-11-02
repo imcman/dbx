@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useI18n } from "vue-i18n";
@@ -149,6 +149,8 @@ const loadingDataTypeOptions = ref(false);
 const loadingExistingTables = ref(false);
 const loadingTarget = ref(false);
 const loadingPreview = ref(false);
+const preparingSourceName = ref("");
+let sourceOptionsUpdateDepth = 0;
 const importMode = ref<api.TableImportMode>("append");
 const batchSize = ref(500);
 const running = ref(false);
@@ -554,6 +556,7 @@ function resetState() {
   importMode.value = "append";
   batchSize.value = 500;
   loadingPreview.value = false;
+  preparingSourceName.value = "";
   loadingExistingTables.value = false;
   loadingTarget.value = false;
   running.value = false;
@@ -903,7 +906,10 @@ async function loadPreview(fileOrPath = selectedSource.value) {
   sqlScriptFallbackSource.value = null;
   try {
     const nextPreview = await previewSelectedImportFile(fileOrPath);
-    if (requestId !== previewRequestId) return;
+    if (requestId !== previewRequestId) {
+      if (nextPreview.sourceRef) releaseDetachedPreviewSources([nextPreview.sourceRef]);
+      return;
+    }
     preview.value = nextPreview;
     if (sourceFormat.value === "excel" && !selectedSheet.value && nextPreview.sheets?.length) {
       selectedSheet.value = nextPreview.sheets[0];
@@ -922,34 +928,41 @@ async function loadPreview(fileOrPath = selectedSource.value) {
   }
 }
 
-function assignSelectedSource(source: string | File) {
-  const detectedFormat = detectFormat(typeof source === "string" ? source : source.name);
-  if (detectedFormat === "parquet" && !supportsDuckDbParquetImport.value) {
-    selectedSource.value = null;
+async function assignSelectedSource(source: string | File) {
+  sourceOptionsUpdateDepth++;
+  try {
+    const detectedFormat = detectFormat(typeof source === "string" ? source : source.name);
+    if (detectedFormat === "parquet" && !supportsDuckDbParquetImport.value) {
+      selectedSource.value = null;
+      preview.value = null;
+      errorMessage.value = t("tableImport.parquetOnlyDuckdb");
+      return;
+    }
+    batchTasks.value = [];
+    selectedSource.value = source;
     preview.value = null;
-    errorMessage.value = t("tableImport.parquetOnlyDuckdb");
-    return;
+    columnMapping.value = {};
+    columnGenerators.value = {};
+    generatedColumns.value = [];
+    columnDataTypes.value = {};
+    progress.value = null;
+    errorMessage.value = "";
+    sqlScriptFallbackSource.value = null;
+    const name = typeof source === "string" ? source : source.name;
+    sourceFormat.value = detectedFormat;
+    emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
+    if (!newTableName.value.trim()) {
+      newTableName.value = suggestedTableName(name);
+    }
+    delimiter.value = sourceFormat.value === "tsv" ? "\\t" : ",";
+    selectedSheet.value = "";
+    wizardStep.value = "options";
+    void loadPreview(source);
+  } finally {
+    // Flush option watchers while this selection already owns its preview request.
+    await nextTick();
+    sourceOptionsUpdateDepth--;
   }
-  batchTasks.value = [];
-  selectedSource.value = source;
-  preview.value = null;
-  columnMapping.value = {};
-  columnGenerators.value = {};
-  generatedColumns.value = [];
-  columnDataTypes.value = {};
-  progress.value = null;
-  errorMessage.value = "";
-  sqlScriptFallbackSource.value = null;
-  const name = typeof source === "string" ? source : source.name;
-  sourceFormat.value = detectedFormat;
-  emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
-  if (!newTableName.value.trim()) {
-    newTableName.value = suggestedTableName(name);
-  }
-  delimiter.value = sourceFormat.value === "tsv" ? "\\t" : ",";
-  selectedSheet.value = "";
-  wizardStep.value = "options";
-  void loadPreview(source);
 }
 
 function activateBatchTask(index: number) {
@@ -979,6 +992,8 @@ function saveActiveBatchTask() {
 }
 
 async function prepareBatchSources(sources: ImportSource[]) {
+  const requestId = ++previewRequestId;
+  const sourceRefs = new Set<string>();
   loadingPreview.value = true;
   errorMessage.value = "";
   const tasks: BatchImportTask[] = [];
@@ -995,6 +1010,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
   try {
     for (const [index, source] of sources.entries()) {
       previewingSource = source;
+      preparingSourceName.value = sourceName(source);
       const format = formats[index]!;
       const initialPreview = await api.previewTableImportFile(source, {
         connectionId: props.prefillConnectionId,
@@ -1003,6 +1019,8 @@ async function prepareBatchSources(sources: ImportSource[]) {
         parseOptions: taskParseOptions(format),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
       });
+      if (initialPreview.sourceRef) sourceRefs.add(initialPreview.sourceRef);
+      if (requestId !== previewRequestId) return;
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
         const input = importPreviewInput(uploadedImportSourceFromPreview(initialPreview), source);
@@ -1017,6 +1035,8 @@ async function prepareBatchSources(sources: ImportSource[]) {
               previewLimit: Math.max(1, Number(previewLimit.value) || 50),
             })
           : initialPreview;
+        if (taskPreview.sourceRef) sourceRefs.add(taskPreview.sourceRef);
+        if (requestId !== previewRequestId) return;
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
@@ -1039,19 +1059,38 @@ async function prepareBatchSources(sources: ImportSource[]) {
     batchTasks.value = tasks;
     if (tasks.length) {
       const firstSelectedIndex = tasks.findIndex((task) => task.selected);
-      activateBatchTask(Math.max(0, firstSelectedIndex));
-      wizardStep.value = "options";
+      sourceOptionsUpdateDepth++;
+      try {
+        activateBatchTask(Math.max(0, firstSelectedIndex));
+        wizardStep.value = "options";
+        await nextTick();
+      } finally {
+        sourceOptionsUpdateDepth--;
+      }
     }
   } catch (e: any) {
+    if (requestId !== previewRequestId) return;
     batchTasks.value = [];
     errorMessage.value = String(e?.message || e);
     if (previewingSource !== undefined && detectFormat(sourceName(previewingSource)) === "sql") sqlScriptFallbackSource.value = previewingSource;
   } finally {
-    loadingPreview.value = false;
+    if (requestId === previewRequestId) {
+      loadingPreview.value = false;
+      preparingSourceName.value = "";
+    }
+    releaseDetachedPreviewSources(sourceRefs);
+  }
+}
+
+function releaseDetachedPreviewSources(sourceRefs: Iterable<string>) {
+  const retained = new Set([preview.value?.sourceRef, ...batchTasks.value.map((task) => task.preview.sourceRef)]);
+  for (const sourceRef of sourceRefs) {
+    if (!retained.has(sourceRef)) void api.releaseTableImportSource(sourceRef).catch(() => {});
   }
 }
 
 async function selectFile() {
+  if (running.value || loadingPreview.value) return;
   if (!isTauriRuntime()) {
     fileInput.value?.click();
     return;
@@ -1082,12 +1121,27 @@ async function handleFileInputChange(event: Event) {
 }
 
 async function applySelectedSources(sources: ImportSource[]) {
+  if (!sources.length || running.value) return;
+  previewRequestId++;
+  batchEncodingRequestId++;
+  preparingSourceName.value = "";
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
   // A Navicat archive restores a whole database, so only a single-file selection may
   // take that path; a mixed batch must stay in the table-import flow for the other files.
   const navicatBackup = supportsNavicatBackupImport.value && sources.length === 1 ? sources.find((source) => sourceName(source).toLowerCase().endsWith(`.${NAVICAT_BACKUP_FORMAT}`)) : undefined;
   if (navicatBackup) await openSqlFileExecutor(navicatBackup);
-  else if (targetMode.value === "create") await prepareBatchSources(sources);
-  else assignSelectedSource(sources[0]!);
+  else if (targetMode.value === "create") {
+    // Leave the old source's editable options while preparing its replacement.
+    void releaseTableImportSources();
+    selectedSource.value = null;
+    preview.value = null;
+    batchTasks.value = [];
+    wizardStep.value = "source";
+    await prepareBatchSources(sources);
+  } else await assignSelectedSource(sources[0]!);
 }
 
 function selectFormatCard(format: SourceFormatCard["value"]) {
@@ -1535,6 +1589,11 @@ async function startBatchImport() {
           const hasRemainingTasks = queueIndex < tasks.length - 1;
           const aggregateStatus = nextProgress.status === "done" && hasRemainingTasks ? "running" : nextProgress.status;
           const aggregatePhase = nextProgress.status === "done" && hasRemainingTasks ? "preparing" : nextProgress.phase;
+          // SQL preflight may have read the whole file before writing its first row.
+          // For a byte-weighted queue, derive this file's write progress from its
+          // now-known row count rather than treating those validation bytes as written.
+          const writingWithKnownRows = !totalRowsExact && (nextProgress.phase === "writing" || nextProgress.phase === "finalizing") && nextProgress.totalRowsExact !== false && nextProgress.totalRows > 0;
+          const taskBytesRead = writingWithKnownRows ? task.preview.sizeBytes * Math.min(1, Math.max(0, (nextProgress.rowsImported + (nextProgress.rowsFailed ?? 0)) / nextProgress.totalRows)) : (nextProgress.bytesRead ?? 0);
           progress.value = {
             ...nextProgress,
             status: aggregateStatus,
@@ -1545,7 +1604,7 @@ async function startBatchImport() {
             failuresTruncated: completedFailuresTruncated || !!nextProgress.failuresTruncated,
             totalRows,
             totalRowsExact,
-            bytesRead: completedBytes + (nextProgress.bytesRead ?? 0),
+            bytesRead: completedBytes + taskBytesRead,
             totalBytes,
             elapsedMs: liveElapsedMs.value,
           };
@@ -1626,7 +1685,8 @@ async function cancelImport() {
 
 function schedulePreviewReload() {
   // Batch tasks own independent previews and mappings; reloading the active task would overwrite its saved configuration.
-  if (isBatchImport.value || !selectedSource.value || running.value) return;
+  // Excel still reloads when its initial preview selects a concrete worksheet.
+  if ((sourceOptionsUpdateDepth > 0 && sourceFormat.value !== "excel") || isBatchImport.value || !selectedSource.value || running.value) return;
   if (previewReloadTimer) clearTimeout(previewReloadTimer);
   previewReloadTimer = setTimeout(() => {
     void loadPreview();
@@ -1634,6 +1694,7 @@ function schedulePreviewReload() {
 }
 
 function schedulePreviewReloadAfterEncodingChange() {
+  if (sourceOptionsUpdateDepth > 0) return;
   if (isBatchImport.value) {
     void reloadBatchPreviewsForEncoding();
     return;
@@ -1689,6 +1750,10 @@ watch(
       void loadTargetColumns();
       void loadDataTypeOptions();
     } else {
+      previewRequestId++;
+      batchEncodingRequestId++;
+      loadingPreview.value = false;
+      preparingSourceName.value = "";
       minimized.value = false;
       backgroundMode.value = false;
       dialogDragOffset.value = { x: 0, y: 0 };
@@ -1703,6 +1768,8 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  previewRequestId++;
+  batchEncodingRequestId++;
   stopDialogDrag();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
@@ -1850,8 +1917,9 @@ watch(rawProgressPercent, (percent) => {
         <div v-if="wizardStep === 'source'" class="space-y-4">
           <div class="rounded-md border border-dashed p-6 text-center">
             <FileUp class="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-            <div class="text-sm font-medium">{{ selectedSourceName || t("tableImport.noFileSelected") }}</div>
-            <Button class="mt-4" size="sm" @click="selectFile">
+            <div class="text-sm font-medium">{{ preparingSourceName || selectedSourceName || t("tableImport.noFileSelected") }}</div>
+            <div v-if="loadingPreview" role="status" class="mt-2 text-xs text-muted-foreground">{{ t("common.loading") }}</div>
+            <Button class="mt-4" size="sm" :disabled="running || loadingPreview" @click="selectFile">
               <Upload class="mr-1.5 h-3.5 w-3.5" />
               {{ t("tableImport.selectFile") }}
             </Button>

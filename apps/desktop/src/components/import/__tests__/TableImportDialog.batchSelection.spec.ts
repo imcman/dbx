@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { TableImportPreview, TableImportRequest, TableImportProgress, TableImportSummary } from "@/lib/backend/api";
@@ -220,11 +220,26 @@ async function flushAsyncUpdates() {
 async function mountSourceDialog(connectionId = "connection-1", props: Record<string, unknown> = {}) {
   const container = document.createElement("div");
   document.body.append(container);
-  const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: connectionId, prefillDatabase: "main", ...props }) }));
+  const isOpen = ref(true);
+  const app = createApp(
+    defineComponent({
+      setup: () => () =>
+        h(TableImportDialog, {
+          open: isOpen.value,
+          "onUpdate:open": (value: boolean) => {
+            isOpen.value = value;
+          },
+          prefillConnectionId: connectionId,
+          prefillDatabase: "main",
+          ...props,
+        }),
+    }),
+  );
   mountedApps.push(app);
   app.use(i18n);
   app.mount(container);
   await flushAsyncUpdates();
+  return isOpen;
 }
 
 async function selectFiles(files: File[]) {
@@ -299,6 +314,178 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it("shows the selected SQL filename while preparing its preview and disables both pickers", async () => {
+    let resolvePreview!: (value: TableImportPreview) => void;
+    mocks.previewTableImportFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePreview = resolve;
+        }),
+    );
+    await mountSourceDialog();
+    await selectFiles([new File(["sql"], "large.sql")]);
+    expect(document.body.textContent).toContain("large.sql");
+    expect(document.body.querySelector('[role="status"]')?.textContent).toContain("Loading");
+    const pickers = [...document.body.querySelectorAll<HTMLButtonElement>("button")].filter((item) => item.textContent?.trim() === "Select File");
+    expect(pickers).toHaveLength(2);
+    expect(pickers.every((item) => item.disabled)).toBe(true);
+    resolvePreview({ ...delimitedPreview(), fileName: "large.sql", fileType: "sql" });
+    await flushAsyncUpdates();
+  });
+
+  it.each([false, true])("previews a selected SQL file once and still reloads explicit option edits (existing target: %s)", async (existing) => {
+    mocks.previewTableImportFile.mockResolvedValue({ ...delimitedPreview(), fileName: "large.sql", fileType: "sql", totalRowsExact: false });
+    await mountSourceDialog("connection-1", existing ? { prefillTable: "existing_target" } : {});
+    await selectFiles([new File(["sql"], "large.sql")]);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(1);
+    const limit = [...document.body.querySelectorAll<HTMLInputElement>("input")].find((item) => item.value === "50")!;
+    expect(limit).toBeTruthy();
+    limit.value = "25";
+    limit.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(2);
+    expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1].previewLimit).toBe(25);
+  });
+
+  it("ignores a pending batch preview after closing and reopening the dialog", async () => {
+    let resolvePreview!: (value: TableImportPreview) => void;
+    mocks.previewTableImportFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePreview = resolve;
+        }),
+    );
+    const isOpen = await mountSourceDialog();
+    await selectFiles([new File(["sql"], "stale.sql")]);
+    isOpen.value = false;
+    await flushAsyncUpdates();
+    isOpen.value = true;
+    await flushAsyncUpdates();
+    resolvePreview({ ...delimitedPreview(), fileName: "stale.sql", fileType: "sql", sourceRef: "stale-source" });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("No file selected");
+    expect(document.body.textContent).not.toContain("stale.sql");
+    expect(mocks.releaseTableImportSource).toHaveBeenCalledWith("stale-source");
+    expect(button("Next").disabled).toBe(true);
+  });
+
+  it("shows the replacement source instead of keeping the old source options editable", async () => {
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    await mountDialog([new File(["csv"], "old.csv")]);
+    let resolvePreview!: (value: TableImportPreview) => void;
+    mocks.previewTableImportFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePreview = resolve;
+        }),
+    );
+    await selectFiles([new File(["sql"], "replacement.sql")]);
+    expect(document.body.textContent).toContain("replacement.sql");
+    expect(document.body.textContent).not.toContain("old.csv");
+    expect(document.body.querySelector('[role="status"]')?.textContent).toContain("Loading");
+    expect([...document.body.querySelectorAll<HTMLInputElement>("input")].some((item) => item.value === "50")).toBe(false);
+    expect(mocks.releaseTableImportSource).toHaveBeenCalledWith("delimited-source");
+    resolvePreview({ ...delimitedPreview(), sourceRef: "replacement-source", fileName: "replacement.sql", fileType: "sql" });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("replacement.sql");
+    expect(document.body.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("keeps the newest source when an earlier preview resolves later", async () => {
+    const pending = new Map<string, (value: TableImportPreview) => void>();
+    mocks.previewTableImportFile.mockImplementation(
+      (file: File) =>
+        new Promise((resolve) => {
+          pending.set(file.name, resolve);
+        }),
+    );
+    await mountSourceDialog();
+    await selectFiles([new File(["sql"], "old.sql")]);
+    await selectFiles([new File(["sql"], "new.sql")]);
+    pending.get("new.sql")!({ ...delimitedPreview(), fileName: "new.sql", fileType: "sql", sourceRef: "new-source" });
+    await flushAsyncUpdates();
+    pending.get("old.sql")!({ ...delimitedPreview(), fileName: "old.sql", fileType: "sql", sourceRef: "old-source" });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("new.sql");
+    expect(document.body.textContent).not.toContain("old.sql");
+    expect(mocks.releaseTableImportSource).toHaveBeenCalledWith("old-source");
+    expect(mocks.releaseTableImportSource).not.toHaveBeenCalledWith("new-source");
+  });
+
+  it("advances writing progress after SQL source validation without sticking at 99 percent", async () => {
+    mocks.previewTableImportFile.mockResolvedValue({ ...delimitedPreview(), fileType: "sql", totalRowsExact: false, sizeBytes: 100 });
+    let update!: (progress: TableImportProgress) => void;
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.importTableFile.mockImplementation((request, onProgress) => {
+      update = onProgress;
+      onProgress({ importId: request.importId, status: "running", phase: "preparing", rowsImported: 0, totalRows: 0, totalRowsExact: false, bytesRead: 100, totalBytes: 100, elapsedMs: 1 });
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    await mountDialog([new File(["sql"], "large.sql")]);
+    await startImport();
+    expect(document.body.textContent).toContain("10%");
+    update({ importId: "test", status: "running", phase: "writing", rowsImported: 50, totalRows: 100, totalRowsExact: true, bytesRead: 50, totalBytes: 100, elapsedMs: 2 });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("55%");
+    expect(document.body.textContent).toContain("50 / 100");
+    finish({ importId: "test", rowsImported: 100, totalRows: 100, elapsedMs: 3 });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("100%");
+  });
+
+  it("uses written rows instead of preflight bytes for a partial-preview SQL queue", async () => {
+    mocks.previewTableImportFile.mockImplementation((file: File) => Promise.resolve({ ...delimitedPreview(), fileName: file.name, fileType: "sql", sourceRef: file.name, totalRowsExact: false, sizeBytes: 100 }));
+    const pending: { update: (progress: TableImportProgress) => void; finish: (summary: TableImportSummary) => void }[] = [];
+    mocks.importTableFile.mockImplementation((request, onProgress) => {
+      onProgress({ importId: request.importId, status: "running", phase: "preparing", rowsImported: 0, totalRows: 0, totalRowsExact: false, bytesRead: 100, totalBytes: 100, elapsedMs: 1 });
+      return new Promise((resolve) => {
+        pending.push({ update: onProgress, finish: resolve });
+      });
+    });
+    await mountDialog([new File(["sql"], "first.sql"), new File(["sql"], "second.sql")]);
+    await startImport();
+    const write = async (index: number, rowsImported: number) => {
+      pending[index]!.update({ importId: "test", status: "running", phase: "writing", rowsImported, totalRows: 100, totalRowsExact: true, bytesRead: 100, totalBytes: 100, elapsedMs: 2 });
+      await flushAsyncUpdates();
+    };
+    expect(document.body.textContent).toContain("5%");
+    await write(0, 0);
+    expect(document.body.textContent).toContain("10%");
+    await write(0, 50);
+    expect(document.body.textContent).toContain("32%");
+    await write(0, 100);
+    expect(document.body.textContent).toContain("55%");
+    pending[0]!.finish({ importId: "first", rowsImported: 100, totalRows: 100, elapsedMs: 3 });
+    await flushAsyncUpdates();
+    expect(pending).toHaveLength(2);
+    expect(document.body.textContent).toContain("55%");
+    await write(1, 0);
+    expect(document.body.textContent).toContain("55%");
+    await write(1, 50);
+    expect(document.body.textContent).toContain("77%");
+    await write(1, 100);
+    expect(document.body.textContent).toContain("99%");
+    pending[1]!.finish({ importId: "second", rowsImported: 100, totalRows: 100, elapsedMs: 3 });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("100%");
+  });
+
+  it("keeps a partial SQL preview and source fingerprint when starting import", async () => {
+    mocks.previewTableImportFile.mockResolvedValue({ ...delimitedPreview(), fileName: "large.sql", fileType: "sql", totalRows: 1, totalRowsExact: false, effectiveEncoding: "utf8", sourceFingerprint: "partial-sql" });
+    await mountDialog([new File(["sql"], "large.sql")]);
+    await startImport();
+    expect(mocks.importTableFile.mock.calls[0]?.[0]).toMatchObject({
+      sourceFormat: "sql",
+      parseOptions: { encoding: "auto" },
+      preparedSource: { totalRowsExact: false, totalRows: 1, fingerprint: "partial-sql", effectiveEncoding: "utf8", rows: [[1, "a"]] },
+    });
+  });
+
   it.each([false, true])("blocks import when every sheet is empty (single sheet: %s)", async (singleSheet) => {
     mocks.previewTableImportFile.mockResolvedValue({ ...workbookPreview("First"), sheets: singleSheet ? ["First"] : sheets, columns: ["id"], rows: [], totalRows: 0 });
     await mountDialog();

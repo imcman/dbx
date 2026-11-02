@@ -7510,6 +7510,14 @@ async fn mysql_add_column_if_not_exists_fallback(
 /// Route it through the existing query path; MySQL servers that do not support
 /// the syntax still return their normal SQL syntax error.
 fn mysql_statement_returns_rows(sql: &str) -> bool {
+    // A RETURNING clause requires this ASCII keyword. Most import statements
+    // contain large VALUES payloads but no such clause: do not build an AST just
+    // to establish its absence. This is only a negative filter. Matches inside
+    // comments, quoted identifiers or string values still use the parser below,
+    // which preserves its syntax and single-statement checks.
+    if !sql.as_bytes().windows(b"RETURNING".len()).any(|word| word.eq_ignore_ascii_case(b"RETURNING")) {
+        return false;
+    }
     let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
         return false;
     };
@@ -8681,6 +8689,72 @@ mod tests {
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+    }
+
+    #[test]
+    fn mysql_returning_prefilter_preserves_ast_classification() {
+        let legacy = |sql: &str| {
+            let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
+                return false;
+            };
+            let [statement] = statements.as_slice() else {
+                return false;
+            };
+            match statement {
+                Statement::Insert(insert) => insert.returning.is_some(),
+                Statement::Delete(delete) => delete.returning.is_some(),
+                _ => false,
+            }
+        };
+
+        let statements = [
+            "",
+            "INSERT INTO t(id, note) VALUES (1, 'plain')",
+            "INSERT INTO t(id) VALUES (1) RETURNING id",
+            "INSERT INTO t(id) VALUES (1) rEtUrNiNg *;",
+            "REPLACE INTO t(id) VALUES (1) RETURNING id",
+            "DELETE FROM t WHERE id = 1 RETURNING *",
+            "INSERT INTO t(id) SELECT 1 RETURNING id",
+            "INSERT INTO t(id) VALUES (1) ON DUPLICATE KEY UPDATE id = 2 RETURNING id",
+            "INSERT INTO t(note) VALUES ('RETURNING')",
+            "INSERT INTO t(note) VALUES ('before RETURNING after')",
+            "INSERT INTO t(`RETURNING`) VALUES (1)",
+            "INSERT INTO returning_table(id) VALUES (1)",
+            r"INSERT INTO t(note) VALUES ('returning \'quoted\'')",
+            "INSERT INTO t(id) VALUES (1) /* RETURNING id */",
+            "INSERT INTO t(id) VALUES (1) -- RETURNING id\n",
+            "INSERT INTO t(id) VALUES (1) # RETURNING id\n",
+            "INSERT INTO t(id) VALUES (1) /*!100500 RETURNING id */",
+            "INSERT INTO t(id) VALUES (1) RETURNING id /* trailing comment */;",
+            "INSERT INTO t(id) VALUES (1); DELETE FROM t RETURNING id",
+            "INSERT INTO t(id) VALUES (1) RETURNING id; SELECT 1",
+            "INSERT INTO t(id) VALUES (1) RETURNING",
+            "INSERT INTO t(id) VALUES (",
+            "INSERT INTO t(id) VALUES (1) RETURN/**/ING id",
+            "INSERT INTO t(id) VALUES (1) returnıng id",
+            "WITH source AS (SELECT 1 AS id) INSERT INTO t SELECT id FROM source RETURNING id",
+            "SELECT 'RETURNING'",
+            "EXPLAIN INSERT INTO t(id) VALUES (1)",
+            "CALL returning_procedure()",
+            "UPDATE t SET id = 1 RETURNING id",
+        ];
+        for prefix in ["", " \t\n", "/* import */ ", "-- import\n", "# import\n"] {
+            for statement in statements {
+                let sql = format!("{prefix}{statement}");
+                assert_eq!(mysql_statement_returns_rows(&sql), legacy(&sql), "{sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_large_import_values_keep_returning_result_sets() {
+        let values = (0..500).map(|id| format!("({id}, '{}')", "x".repeat(256))).collect::<Vec<_>>().join(",");
+        let sql = format!("INSERT INTO t(id, payload) VALUES {values}");
+        let dialect = MySqlQueryDialect::default();
+        assert!(!is_result_set_query(&sql, dialect));
+        assert!(is_result_set_query(&format!("{sql} RETURNING id"), dialect));
+        assert!(is_result_set_query(&format!("{sql} returning *"), dialect));
+        assert!(!is_result_set_query(&format!("{sql} /* RETURNING id */"), dialect));
     }
 
     #[test]

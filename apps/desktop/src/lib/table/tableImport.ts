@@ -122,7 +122,7 @@ export function tableImportProgressPercent(progress: TableImportProgressLike | n
   let percent = 0;
   const totalRows = progress.totalRows ?? 0;
   const totalBytes = progress.totalBytes ?? 0;
-  if (progress.phase === "detectingEncoding") {
+  if (progress.phase === "detectingEncoding" || progress.phase === "preparing") {
     percent = totalBytes > 0 ? ((progress.bytesRead ?? 0) / totalBytes) * 10 : 0;
   } else if (progress.phase === "writing" || progress.phase === "finalizing") {
     if (progress.totalRowsExact !== false && totalRows > 0) {
